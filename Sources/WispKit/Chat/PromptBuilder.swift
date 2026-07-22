@@ -33,7 +33,11 @@ public struct PromptBuilder: Sendable {
         var messages = history
         messages.append(ChatMessage(role: .user, text: userText, images: images))
         return LLMChatRequest(
-            systemPrompt: SystemPrompt.build(memoryProfile: memoryProfile, supportsVision: supportsVision),
+            systemPrompt: SystemPrompt.build(
+                memoryProfile: memoryProfile,
+                supportsVision: supportsVision,
+                screenshotIncluded: !images.isEmpty
+            ),
             messages: messages,
             maxOutputTokens: config.activeProfile?.maxOutputTokens ?? 1024,
             temperature: config.activeProfile?.temperature

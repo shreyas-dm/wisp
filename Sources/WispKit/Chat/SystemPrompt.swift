@@ -11,7 +11,11 @@ import Foundation
 ///   OpenAI-compatible open model (GLM, Kimi, Qwen, Llama…) can drive the
 ///   full experience, including pointing.
 public enum SystemPrompt {
-    public static func build(memoryProfile: String?, supportsVision: Bool) -> String {
+    public static func build(
+        memoryProfile: String?,
+        supportsVision: Bool,
+        screenshotIncluded: Bool = false
+    ) -> String {
         var sections: [String] = []
 
         sections.append(
@@ -24,7 +28,7 @@ public enum SystemPrompt {
             """
         )
 
-        sections.append(
+        var screenSection =
             """
             SCREEN CONTEXT
             Each user message may include a screen snapshot between <screen> and \
@@ -35,9 +39,17 @@ public enum SystemPrompt {
             deltas: lines starting with + (added), ~ (changed), - (removed) relative \
             to the previous snapshot. Trust the snapshot over assumptions.
             """
-        )
+        if screenshotIncluded {
+            screenSection +=
+                """
+                \nA screenshot of the same screen is attached as an image. Use the \
+                screenshot for visual and spatial understanding, and the snapshot \
+                for exact labels, values, and element IDs.
+                """
+        }
+        sections.append(screenSection)
 
-        sections.append(
+        var pointingSection =
             """
             POINTING
             When referring to a specific on-screen element, append the tag \
@@ -47,9 +59,17 @@ public enum SystemPrompt {
             helps. Never invent IDs that are not in the snapshot, and never mention \
             IDs or tags in your prose — the tag is stripped before display.
             """
-        )
+        if screenshotIncluded {
+            pointingSection +=
+                """
+                \nOnly if the target is visible in the screenshot but missing from \
+                the snapshot, you may point by pixel position with \
+                [[point:x,y,display]] using the snapshot's display numbering.
+                """
+        }
+        sections.append(pointingSection)
 
-        if supportsVision {
+        if supportsVision && !screenshotIncluded {
             sections.append(
                 """
                 SCREENSHOT FALLBACK
