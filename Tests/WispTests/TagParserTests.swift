@@ -1,6 +1,129 @@
 import Foundation
 @testable import WispKit
 
+/// Runs a full string through a fresh parser in one consume + finish.
+private func parseWhole(_ input: String) -> [ResponseChunk] {
+    var parser = ResponseTagParser()
+    return parser.consume(input) + parser.finish()
+}
+
+private func joinedText(_ chunks: [ResponseChunk]) -> String {
+    chunks.compactMap {
+        if case .text(let text) = $0 { return text }
+        return nil
+    }.joined()
+}
+
+private func tags(_ chunks: [ResponseChunk]) -> [ResponseTag] {
+    chunks.compactMap {
+        if case .tag(let tag) = $0 { return tag }
+        return nil
+    }
+}
+
 func tagParserTests(_ t: TestRunner) -> [TestCase] {
-    []  // filled in by the owning module
+    [
+        TestCase("plain text passes through untouched") {
+            let chunks = parseWhole("just a normal sentence, no tags at all.")
+            t.expectEqual(chunks, [.text("just a normal sentence, no tags at all.")])
+        },
+
+        TestCase("point tag mid-sentence") {
+            let chunks = parseWhole("Click Export [[point:e42]] in the toolbar.")
+            t.expectEqual(joinedText(chunks), "Click Export  in the toolbar.")
+            t.expectEqual(tags(chunks), [.point(elementID: "e42")])
+        },
+
+        TestCase("tag survives a split at every offset") {
+            let full = "Click here [[point:e42]] now"
+            for cut in 0...full.count {
+                var parser = ResponseTagParser()
+                let head = String(full.prefix(cut))
+                let tail = String(full.dropFirst(cut))
+                var chunks = parser.consume(head)
+                chunks += parser.consume(tail)
+                chunks += parser.finish()
+                t.expectEqual(joinedText(chunks), "Click here  now", "cut=\(cut)")
+                t.expectEqual(tags(chunks), [.point(elementID: "e42")], "cut=\(cut)")
+            }
+        },
+
+        TestCase("coordinate point forms") {
+            t.expectEqual(
+                tags(parseWhole("Look [[point:100,200,1]]")),
+                [.pointCoordinate(x: 100, y: 200, displayIndex: 1)]
+            )
+            t.expectEqual(
+                tags(parseWhole("Look [[point:12.5, 40]]")),
+                [.pointCoordinate(x: 12.5, y: 40, displayIndex: 0)]
+            )
+        },
+
+        TestCase("screenshot request alone") {
+            let chunks = parseWhole("[[screenshot]]")
+            t.expectEqual(chunks, [.tag(.screenshotRequest)])
+        },
+
+        TestCase("remember fact with punctuation and colons") {
+            let chunks = parseWhole("Noted! [[remember:Prefers vim: yes, really. Uses zsh.]]")
+            t.expectEqual(tags(chunks), [.remember(fact: "Prefers vim: yes, really. Uses zsh.")])
+            t.expectEqual(joinedText(chunks), "Noted! ")
+        },
+
+        TestCase("unknown tag emitted verbatim") {
+            let chunks = parseWhole("before [[foo:bar]] after")
+            t.expectEqual(chunks, [.text("before [[foo:bar]] after")])
+        },
+
+        TestCase("empty remember is malformed, emitted verbatim") {
+            let chunks = parseWhole("[[remember:]]")
+            t.expectEqual(chunks, [.text("[[remember:]]")])
+        },
+
+        TestCase("invalid point ID is malformed, emitted verbatim") {
+            let chunks = parseWhole("[[point:zzz]]")
+            t.expectEqual(chunks, [.text("[[point:zzz]]")])
+        },
+
+        TestCase("unterminated tag flushes as text at finish") {
+            var parser = ResponseTagParser()
+            let first = parser.consume("start [[point:e1")
+            t.expectEqual(first, [.text("start ")])
+            t.expectEqual(parser.finish(), [.text("[[point:e1")])
+        },
+
+        TestCase("trailing single bracket joins next delta") {
+            var parser = ResponseTagParser()
+            var chunks = parser.consume("abc[")
+            t.expectEqual(chunks, [.text("abc")])
+            chunks = parser.consume("[point:e2]] d")
+            t.expectEqual(joinedText(chunks), " d")
+            t.expectEqual(tags(chunks), [.point(elementID: "e2")])
+        },
+
+        TestCase("back-to-back tags with no text between") {
+            let chunks = parseWhole("[[point:e1]][[point:e2]]")
+            t.expectEqual(chunks, [.tag(.point(elementID: "e1")), .tag(.point(elementID: "e2"))])
+        },
+
+        TestCase("text on both sides of a tag") {
+            let chunks = parseWhole("a [[screenshot]] b")
+            t.expectEqual(chunks, [.text("a "), .tag(.screenshotRequest), .text(" b")])
+        },
+
+        TestCase("overlong unterminated candidate released as literal text") {
+            let literal = "[[" + String(repeating: "x", count: 250)
+            var parser = ResponseTagParser()
+            let chunks = parser.consume(literal) + parser.finish()
+            t.expectEqual(joinedText(chunks), literal)
+            t.expectEqual(tags(chunks), [])
+        },
+
+        TestCase("real tag after an overlong literal still parses") {
+            let input = "[[" + String(repeating: "x", count: 250) + " then [[point:e5]] done"
+            let chunks = parseWhole(input)
+            t.expectEqual(tags(chunks), [.point(elementID: "e5")])
+            t.expect(joinedText(chunks).hasSuffix(" then  done"), "surrounding text preserved")
+        },
+    ]
 }

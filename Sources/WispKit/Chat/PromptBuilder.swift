@@ -22,8 +22,14 @@ public struct PromptBuilder: Sendable {
         supportsVision: Bool,
         images: [AttachedImage] = []
     ) -> LLMChatRequest {
-        // TODO(fork-providers): implement (transcript + snapshot composition).
-        let userText = [snapshotBlock, transcript].compactMap { $0 }.joined(separator: "\n\n")
+        let userText: String
+        if let snapshotBlock, !snapshotBlock.isEmpty {
+            // Snapshot above the words, clearly separated, so the model
+            // reads context before the question.
+            userText = snapshotBlock + "\n\nUser said: " + transcript
+        } else {
+            userText = transcript
+        }
         var messages = history
         messages.append(ChatMessage(role: .user, text: userText, images: images))
         return LLMChatRequest(
@@ -35,10 +41,30 @@ public struct PromptBuilder: Sendable {
     }
 
     /// Keeps the last `turnLimit` turns; strips `<screen>…</screen>` blocks
-    /// and images from all but the most recent user turn so long sessions
-    /// stay cheap.
+    /// (full and delta) and images from all but the most recent user turn so
+    /// long sessions stay cheap.
     public static func compactHistory(_ messages: [ChatMessage], turnLimit: Int) -> [ChatMessage] {
-        // TODO(fork-providers): implement.
-        return Array(messages.suffix(turnLimit * 2))
+        var kept = Array(messages.suffix(max(1, turnLimit) * 2))
+        let lastUserIndex = kept.lastIndex { $0.role == .user }
+        for index in kept.indices where index != lastUserIndex && kept[index].role == .user {
+            kept[index].text = stripScreenBlocks(from: kept[index].text)
+            kept[index].images = []
+        }
+        return kept
+    }
+
+    /// Removes `<screen …>…</screen>` blocks and tidies leftover whitespace.
+    static func stripScreenBlocks(from text: String) -> String {
+        var result = text.replacingOccurrences(
+            of: "<screen[^>]*>[\\s\\S]*?</screen>",
+            with: "",
+            options: .regularExpression
+        )
+        result = result.replacingOccurrences(
+            of: "\\n{3,}",
+            with: "\n\n",
+            options: .regularExpression
+        )
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
