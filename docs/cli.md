@@ -63,10 +63,10 @@ $ wisp doctor
   ✓ accessibility    trusted
   ✓ microphone       granted
   ✓ speech           granted
-  ○ screen recording not granted (optional — only the vision fallback needs it)
+  ✓ screen recording granted (hybrid context sends a screenshot each turn)
   ✓ api key          ANTHROPIC_API_KEY present (Keychain)
   ✓ endpoint         https://api.anthropic.com reachable
-  ✓ tts              voice: Samantha (Enhanced)
+  ✓ voice            stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
 ```
 
 Exit code is non-zero when a required check fails, so it can gate scripts.

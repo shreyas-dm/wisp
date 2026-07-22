@@ -66,3 +66,22 @@ ramble, try a larger model or set `"temperature": 0.3`.
 - **Local servers** need no `apiKeyRef`; leave it out entirely.
 - `maxOutputTokens` defaults to 1024 — replies are deliberately short and
   spoken aloud; raise it if you ask for long-form answers.
+
+## Voice engines
+
+Voice is independent of the chat model. Wisp prefers state-of-the-art voice
+APIs and falls back to the local Apple engines so it always has a voice:
+
+| Engine | STT | TTS | Key ref | Notes |
+|---|---|---|---|---|
+| ElevenLabs | Scribe (`scribe_v1`) | `eleven_flash_v2_5` | `ELEVENLABS_API_KEY` | Preferred automatically when the key resolves (`"auto"`) |
+| Apple (local) | Speech framework | AVSpeech | — | Zero-key fallback, fully offline |
+
+```bash
+wisp key set ELEVENLABS_API_KEY
+```
+
+Set `"sttEngine"` / `"ttsEngine"` to `"elevenlabs"` or `"apple"` in
+`~/.wisp/config.json` to pin an engine instead of `"auto"`; pick a voice
+with `"elevenLabsVoiceID"`. The engine layer is a small protocol — new voice
+vendors are easy to add and A/B.

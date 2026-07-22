@@ -8,20 +8,20 @@ ask a question out loud, and it answers in a small bubble and a calm voice —
 having actually looked at your screen — and can fly a pointer to the exact
 button, field, or link it's talking about.
 
-It is built from scratch around three convictions: screen context should be
-**structured text, not pixels**; a screen assistant should work with **any
-model you choose**, including open-source ones; and a companion that forgets
-you after every conversation isn't much of a companion.
+It is built from scratch around three convictions: a screen assistant should
+understand **structure, not just pixels**; it should work with **any model
+you choose**, including open-source ones; and a companion that forgets you
+after every conversation isn't much of a companion.
 
 ## Why Wisp is different
 
-### 1. It sends structure, not screenshots
+### 1. It understands structure, not just pixels
 
-Most screen assistants ship a full screenshot to a vision model on every
-question. Almost all of those image tokens encode window chrome, wallpaper,
-and whitespace. Wisp instead reads the macOS Accessibility tree and sends a
-**Semantic Screen Snapshot** — the frontmost app, window, and visible
-elements, each with a short ID, role, label, value, and position:
+Most screen assistants ship only a screenshot to a vision model on every
+question and hope it can read your screen back out of the pixels. Wisp reads
+the macOS Accessibility tree and builds a **Semantic Screen Snapshot** — the
+frontmost app, window, and visible elements, each with a short ID, role,
+label, value, and position:
 
 ```
 <screen> app=Safari window="Invoice – Stripe" display=1/2 1512x982
@@ -35,19 +35,23 @@ elements, each with a short ID, role, label, value, and position:
 </screen>
 ```
 
-Exact labels, values, and focus (`*`) — richer than pixels for real UI, at a
-fraction of the cost:
+Exact labels, values, and focus (`*`) — information a screenshot can only
+approximate. By default (`hybrid` mode) each turn sends **both** the snapshot
+and a downscaled screenshot, so a vision model gets precise structure *and*
+full visual context — belt and suspenders. And because the expensive part is
+optional, you dial cost with one setting:
 
 | Screen context per turn | Typical tokens |
 |---|---|
-| Retina screenshot (vision model) | 1,500–5,000+ |
-| Semantic Screen Snapshot | 300–1,200 (budget-capped) |
+| Raw retina screenshot (what most tools send) | 1,500–5,000+ |
+| `hybrid` — snapshot + downscaled screenshot (default) | 1,200–2,400 |
+| `structure` — snapshot only | 300–1,200 (budget-capped) |
 | Follow-up snapshot (delta) | 30–150 |
 
-Follow-ups only send what changed (`+` added / `~` changed / `-` removed), so
-multi-turn conversations stay flat. Screenshots still exist — as an explicit
-fallback the model can request for canvases, video, and games, and only when
-your chosen model supports vision.
+Follow-up snapshots only send what changed (`+` added / `~` changed / `-`
+removed), and history compaction drops old screenshots, so multi-turn
+conversations stay flat. Text-only models degrade automatically to
+`structure` mode — and still get the pointing superpower below.
 
 ### 2. It works with any model — including open-source
 
@@ -84,19 +88,24 @@ open dist/Wisp.app
 ```
 
 First launch walks you through permissions: **Accessibility** (required —
-it's how Wisp sees your screen), **Microphone + Speech Recognition** (for
-voice), and optionally **Screen Recording** (only used for the vision
-fallback).
+it's how Wisp sees your screen), **Screen Recording** (for the screenshot
+half of hybrid context), and **Microphone + Speech Recognition** (for
+voice).
 
-Wisp boots with zero API keys: speech-to-text and text-to-speech are local
-(Apple Speech), and a built-in **Demo** profile exercises the full
-experience — bubble, voice, pointing — with canned replies. When you're
-ready, add a real key (stored in the macOS Keychain, never in a file):
+Wisp boots with zero API keys: voice falls back to the local Apple engines
+and a built-in **Demo** profile exercises the full experience — bubble,
+voice, pointing — with canned replies. Add real keys when ready (stored in
+the macOS Keychain, never in a file):
 
 ```bash
 make release
-./.build/release/wisp key set ANTHROPIC_API_KEY
+./.build/release/wisp key set ANTHROPIC_API_KEY    # your model
+./.build/release/wisp key set ELEVENLABS_API_KEY   # state-of-the-art voice
 ```
+
+With an ElevenLabs key present, speech-to-text (Scribe) and text-to-speech
+upgrade automatically; the voice engine layer is pluggable, so other voice
+APIs can slot in as they're added.
 
 Then pick a profile from the menu bar icon. Optionally put the CLI on your
 PATH: `ln -s "$PWD/.build/release/wisp" /usr/local/bin/wisp`.
@@ -104,7 +113,8 @@ PATH: `ln -s "$PWD/.build/release/wisp" /usr/local/bin/wisp`.
 ## Using Wisp
 
 Hold **⌃⌥** and speak. A waveform confirms Wisp is listening; release, and
-the reply streams into the bubble while a local voice reads it. When the
+the reply streams into the bubble while your configured voice reads it
+(ElevenLabs when a key is set, the local system voice otherwise). When the
 answer involves something on screen — *"click Send invoice in the form"* —
 a pointer glides to the element and rings it.
 
@@ -126,10 +136,10 @@ $ wisp doctor
   ✓ accessibility    trusted
   ✓ microphone       granted
   ✓ speech           granted
-  ○ screen recording not granted (optional — only the vision fallback needs it)
+  ✓ screen recording granted (hybrid context sends a screenshot each turn)
   ✓ api key          ANTHROPIC_API_KEY present (Keychain)
   ✓ endpoint         https://api.anthropic.com reachable
-  ✓ tts              voice: Samantha (Enhanced)
+  ✓ voice            stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
 ```
 
 The full command reference is in [docs/cli.md](docs/cli.md).
@@ -174,6 +184,19 @@ reference; Wisp ships with ready-to-fill profiles for the common hosts:
 
 A local Ollama profile needs no key at all — Wisp end to end with nothing
 leaving your machine. Host-by-host details: [docs/models.md](docs/models.md).
+
+Beyond profiles, the interesting knobs (all optional, shown with defaults):
+
+```json
+{
+  "screenContextMode": "hybrid",      // hybrid | structure | auto | screenshot
+  "screenshotMaxDimension": 1024,     // longest side of the attached screenshot
+  "snapshotTokenBudget": 1200,
+  "sttEngine": "auto",                // auto | elevenlabs | apple
+  "ttsEngine": "auto",
+  "elevenLabsVoiceID": "21m00Tcm4TlvDq8ikWAM"
+}
+```
 
 ## Privacy
 
