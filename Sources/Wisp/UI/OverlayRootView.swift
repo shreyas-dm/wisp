@@ -1,21 +1,21 @@
 import SwiftUI
 import WispKit
 
-/// Full-screen, click-through overlay content: orb (bottom right), response
-/// bubble above it, and the pointer animation layer.
+/// Full-screen, click-through overlay content: the draggable orb, the
+/// response bubble above it, and the pointer animation layer.
 struct OverlayRootView: View {
     @ObservedObject var engine: CompanionEngine
     @ObservedObject var pointerModel: PointerModel
+    @ObservedObject var orbPosition: OrbPositionModel
+    let onOrbDragEnded: () -> Void
 
-    private let orbDiameter: CGFloat = 30
-    private let orbMargin: CGFloat = 24
+    @State private var dragStartCenter: CGPoint?
+
+    private let orbDiameter = OrbPositionModel.orbDiameter
 
     var body: some View {
         GeometryReader { geometry in
-            let orbCenter = CGPoint(
-                x: geometry.size.width - orbMargin - orbDiameter / 2,
-                y: geometry.size.height - orbMargin - orbDiameter / 2
-            )
+            let orbCenter = orbPosition.center
             ZStack(alignment: .topLeading) {
                 PointerLayer(request: pointerModel.request, orbCenter: orbCenter)
 
@@ -25,30 +25,62 @@ struct OverlayRootView: View {
                     alwaysVisible: engine.orbAlwaysVisible
                 )
                 .frame(width: orbDiameter, height: orbDiameter)
+                .scaleEffect(orbPosition.isDragging ? 1.15 : 1.0)
+                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: orbPosition.isDragging)
                 .position(orbCenter)
+                .gesture(orbDragGesture)
 
-                bubble(in: geometry.size)
+                bubble(in: geometry.size, orbCenter: orbCenter)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .onAppear { orbPosition.viewSize = geometry.size }
+            .onChange(of: geometry.size) { newSize in
+                orbPosition.viewSize = newSize
+            }
         }
         .ignoresSafeArea()
     }
 
+    /// Dragging repositions the orb; position is clamped live and persisted
+    /// on release by the controller.
+    private var orbDragGesture: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { value in
+                if dragStartCenter == nil {
+                    dragStartCenter = orbPosition.center
+                    orbPosition.isDragging = true
+                }
+                let start = dragStartCenter ?? orbPosition.center
+                orbPosition.center = orbPosition.clamped(
+                    CGPoint(x: start.x + value.translation.width, y: start.y + value.translation.height)
+                )
+            }
+            .onEnded { _ in
+                dragStartCenter = nil
+                orbPosition.isDragging = false
+                onOrbDragEnded()
+            }
+    }
+
     @ViewBuilder
-    private func bubble(in size: CGSize) -> some View {
+    private func bubble(in size: CGSize, orbCenter: CGPoint) -> some View {
         let showsTranscript = engine.state == .listening && !engine.partialTranscript.isEmpty
         let showsListeningHint = engine.state == .listening && engine.partialTranscript.isEmpty
         let showsReply = !engine.bubbleText.isEmpty
         if showsReply || showsTranscript || showsListeningHint {
+            // Anchored above the orb, clamped so it never leaves the screen;
+            // flips below the orb when the orb is near the top edge.
+            let halfWidth: CGFloat = 190
+            let bubbleX = min(max(orbCenter.x, halfWidth + 12), size.width - halfWidth - 12)
+            let aboveY = orbCenter.y - orbDiameter / 2 - 16 - 60
+            let bubbleY = aboveY > 80 ? aboveY : orbCenter.y + orbDiameter / 2 + 16 + 60
             ResponseBubbleView(
                 text: showsReply ? engine.bubbleText : (showsTranscript ? engine.partialTranscript : "Listening…"),
                 isSecondary: !showsReply
             )
             .frame(maxWidth: 380, alignment: .trailing)
-            .position(
-                x: size.width - orbMargin - 190,
-                y: size.height - orbMargin - orbDiameter - 16 - 60
-            )
+            .position(x: bubbleX, y: bubbleY)
+            .allowsHitTesting(false)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .animation(.easeOut(duration: 0.25), value: engine.bubbleText)
             .animation(.easeOut(duration: 0.25), value: engine.state)

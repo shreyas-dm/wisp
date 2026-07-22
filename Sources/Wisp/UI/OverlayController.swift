@@ -15,21 +15,56 @@ final class PointerModel: ObservableObject {
     @Published var request: PointRequest?
 }
 
+/// Position of the draggable orb within the overlay view (top-left origin).
+@MainActor
+final class OrbPositionModel: ObservableObject {
+    @Published var center: CGPoint = .zero
+    @Published var isDragging = false
+    /// Size of the overlay view, kept in sync so clamping and persistence
+    /// can convert between points and screen fractions.
+    var viewSize: CGSize = .zero
+
+    static let orbDiameter: CGFloat = 30
+    static let margin: CGFloat = 24
+
+    func clamped(_ point: CGPoint) -> CGPoint {
+        let inset = Self.orbDiameter / 2 + 8
+        return CGPoint(
+            x: min(max(point.x, inset), max(inset, viewSize.width - inset)),
+            y: min(max(point.y, inset), max(inset, viewSize.height - inset))
+        )
+    }
+
+    var defaultCenter: CGPoint {
+        CGPoint(
+            x: viewSize.width - Self.margin - Self.orbDiameter / 2,
+            y: viewSize.height - Self.margin - Self.orbDiameter / 2
+        )
+    }
+}
+
 /// Hosts the click-through overlay: the orb companion, the response bubble,
 /// and the pointer animation layer. One persistent full-screen panel lives
 /// on the main display; pointing at elements on other displays flashes an
-/// ephemeral highlight panel there.
+/// ephemeral highlight panel there. The panel stays click-through except
+/// while the cursor hovers the orb, which lets the orb be dragged.
 @MainActor
 final class OverlayController {
     private let engine: CompanionEngine
     private let pointerModel = PointerModel()
+    private let orbPosition = OrbPositionModel()
     private var panel: NSPanel?
     private var pointerClearTask: Task<Void, Never>?
     private var screenChangeObserver: NSObjectProtocol?
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
+
+    private let positionDefaults = UserDefaults(suiteName: "so.wisp.app")
 
     init(engine: CompanionEngine) {
         self.engine = engine
         buildPanel()
+        startHoverTracking()
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -53,6 +88,18 @@ final class OverlayController {
 
     func interactionEnded() {
         // The orb/bubble fade via SwiftUI; the panel stays resident.
+    }
+
+    /// Where the orb currently sits, in global Cocoa (bottom-left origin)
+    /// screen coordinates — used to place the floating text input nearby.
+    func orbScreenPointCocoa() -> NSPoint {
+        guard let panel, let screen = panel.screen ?? NSScreen.main else {
+            return NSEvent.mouseLocation
+        }
+        return NSPoint(
+            x: screen.frame.minX + orbPosition.center.x,
+            y: screen.frame.maxY - orbPosition.center.y
+        )
     }
 
     /// Points at an element frame given in global Quartz (top-left origin)
@@ -92,7 +139,14 @@ final class OverlayController {
             defer: false
         )
         configureOverlayPanel(newPanel)
-        let rootView = OverlayRootView(engine: engine, pointerModel: pointerModel)
+        orbPosition.viewSize = screen.frame.size
+        restoreOrbPosition()
+        let rootView = OverlayRootView(
+            engine: engine,
+            pointerModel: pointerModel,
+            orbPosition: orbPosition,
+            onOrbDragEnded: { [weak self] in self?.persistOrbPosition() }
+        )
         newPanel.contentView = NSHostingView(rootView: rootView)
         newPanel.setFrame(screen.frame, display: true)
         newPanel.orderFrontRegardless()
@@ -115,6 +169,8 @@ final class OverlayController {
     private func repositionPanel() {
         guard let panel, let screen = NSScreen.main else { return }
         panel.setFrame(screen.frame, display: true)
+        orbPosition.viewSize = screen.frame.size
+        restoreOrbPosition()
     }
 
     private func schedulePointerClear() {
@@ -123,6 +179,75 @@ final class OverlayController {
             try? await Task.sleep(nanoseconds: 2_600_000_000)
             guard !Task.isCancelled else { return }
             self?.pointerModel.request = nil
+        }
+    }
+
+    // MARK: - Orb position persistence
+
+    /// Stored as screen fractions, keyed by display count, so the position
+    /// survives resolution changes and display plug/unplug sensibly.
+    private var orbPositionKey: String {
+        "orbPositionFraction-\(NSScreen.screens.count)displays"
+    }
+
+    private func restoreOrbPosition() {
+        guard orbPosition.viewSize.width > 0, orbPosition.viewSize.height > 0 else { return }
+        if let stored = positionDefaults?.string(forKey: orbPositionKey) {
+            let parts = stored.split(separator: ",").compactMap { Double($0) }
+            if parts.count == 2 {
+                let point = CGPoint(
+                    x: parts[0] * orbPosition.viewSize.width,
+                    y: parts[1] * orbPosition.viewSize.height
+                )
+                orbPosition.center = orbPosition.clamped(point)
+                return
+            }
+        }
+        orbPosition.center = orbPosition.defaultCenter
+    }
+
+    private func persistOrbPosition() {
+        guard orbPosition.viewSize.width > 0, orbPosition.viewSize.height > 0 else { return }
+        let fractionX = orbPosition.center.x / orbPosition.viewSize.width
+        let fractionY = orbPosition.center.y / orbPosition.viewSize.height
+        positionDefaults?.set(String(format: "%.4f,%.4f", fractionX, fractionY), forKey: orbPositionKey)
+    }
+
+    // MARK: - Hover tracking
+
+    /// The panel must stay click-through so Wisp never blocks the user's
+    /// work — except when the cursor is over the orb, where mouse events are
+    /// needed for dragging. Global+local mouse-moved monitors flip
+    /// `ignoresMouseEvents` exactly within that window.
+    private func startHoverTracking() {
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+            Task { @MainActor in self?.updateHoverState() }
+        }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            Task { @MainActor in self?.updateHoverState() }
+            return event
+        }
+    }
+
+    private func updateHoverState() {
+        guard let panel, let screen = panel.screen ?? NSScreen.main else { return }
+        // A hidden orb (transient mode, idle) must never intercept clicks.
+        let orbIsVisible = engine.orbAlwaysVisible || engine.state != .idle
+        guard orbIsVisible || orbPosition.isDragging else {
+            if !panel.ignoresMouseEvents { panel.ignoresMouseEvents = true }
+            return
+        }
+        let mouse = NSEvent.mouseLocation
+        let localPoint = CGPoint(
+            x: mouse.x - screen.frame.minX,
+            y: screen.frame.maxY - mouse.y
+        )
+        let orbCenter = orbPosition.center
+        let hoverRadius = OrbPositionModel.orbDiameter / 2 + 8
+        let distance = hypot(localPoint.x - orbCenter.x, localPoint.y - orbCenter.y)
+        let shouldReceiveMouse = distance <= hoverRadius || orbPosition.isDragging
+        if panel.ignoresMouseEvents == shouldReceiveMouse {
+            panel.ignoresMouseEvents = !shouldReceiveMouse
         }
     }
 

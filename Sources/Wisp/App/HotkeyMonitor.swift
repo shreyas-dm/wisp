@@ -1,21 +1,32 @@
 import AppKit
 import Foundation
 
-/// System-wide push-to-talk: fires `onPress` when ⌃ and ⌥ are both held,
-/// `onRelease` when either lifts. Prefers a listen-only CGEvent tap (works
-/// while any app has focus); falls back to NSEvent global+local monitors
-/// when the tap cannot be created (no Accessibility trust yet).
+/// System-wide shortcuts: fires `onPress` when ⌃ and ⌥ are both held,
+/// `onRelease` when either lifts, `onEscape` on Esc, and
+/// `onTextInputShortcut` on ⌃⌥Space. Prefers a listen-only CGEvent tap
+/// (works while any app has focus); falls back to NSEvent global+local
+/// monitors when the tap cannot be created (no Accessibility trust yet).
 @MainActor
 final class HotkeyMonitor {
     var onPress: () -> Void
     var onRelease: () -> Void
+    /// Fired on Esc anywhere. The owner decides whether an interaction is
+    /// active; the tap is listen-only so nothing is ever swallowed.
+    var onEscape: () -> Void = {}
+    /// Fired on ⌃⌥Space anywhere.
+    var onTextInputShortcut: () -> Void = {}
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var globalMonitor: Any?
-    private var localMonitor: Any?
+    private var globalFlagsMonitor: Any?
+    private var localFlagsMonitor: Any?
+    private var globalKeyMonitor: Any?
+    private var localKeyMonitor: Any?
     private var comboHeld = false
     private(set) var usingEventTap = false
+
+    static let escapeKeyCode: Int64 = 53
+    static let spaceKeyCode: Int64 = 49
 
     init(onPress: @escaping () -> Void, onRelease: @escaping () -> Void) {
         self.onPress = onPress
@@ -41,14 +52,15 @@ final class HotkeyMonitor {
         }
         eventTap = nil
         runLoopSource = nil
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
+        for monitor in [globalFlagsMonitor, localFlagsMonitor, globalKeyMonitor, localKeyMonitor] {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+            }
         }
-        if let localMonitor {
-            NSEvent.removeMonitor(localMonitor)
-        }
-        globalMonitor = nil
-        localMonitor = nil
+        globalFlagsMonitor = nil
+        localFlagsMonitor = nil
+        globalKeyMonitor = nil
+        localKeyMonitor = nil
         comboHeld = false
     }
 
@@ -69,6 +81,14 @@ final class HotkeyMonitor {
         }
     }
 
+    func handleKeyDown(keyCode: Int64, controlHeld: Bool, optionHeld: Bool) {
+        if keyCode == Self.escapeKeyCode {
+            onEscape()
+        } else if keyCode == Self.spaceKeyCode && controlHeld && optionHeld {
+            onTextInputShortcut()
+        }
+    }
+
     fileprivate func reenableTap() {
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: true)
@@ -79,6 +99,7 @@ final class HotkeyMonitor {
 
     private func startEventTap() -> Bool {
         let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
+            | CGEventMask(1 << CGEventType.keyDown.rawValue)
         let selfPointer = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -101,18 +122,35 @@ final class HotkeyMonitor {
     // MARK: - NSEvent fallback
 
     private func startMonitorFallback() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             let control = event.modifierFlags.contains(.control)
             let option = event.modifierFlags.contains(.option)
             Task { @MainActor in
                 self?.handleFlags(controlHeld: control, optionHeld: option)
             }
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             let control = event.modifierFlags.contains(.control)
             let option = event.modifierFlags.contains(.option)
             Task { @MainActor in
                 self?.handleFlags(controlHeld: control, optionHeld: option)
+            }
+            return event
+        }
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let keyCode = Int64(event.keyCode)
+            let control = event.modifierFlags.contains(.control)
+            let option = event.modifierFlags.contains(.option)
+            Task { @MainActor in
+                self?.handleKeyDown(keyCode: keyCode, controlHeld: control, optionHeld: option)
+            }
+        }
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let keyCode = Int64(event.keyCode)
+            let control = event.modifierFlags.contains(.control)
+            let option = event.modifierFlags.contains(.option)
+            Task { @MainActor in
+                self?.handleKeyDown(keyCode: keyCode, controlHeld: control, optionHeld: option)
             }
             return event
         }
@@ -138,6 +176,13 @@ private func hotkeyEventTapCallback(
         let option = event.flags.contains(.maskAlternate)
         Task { @MainActor in
             monitor.handleFlags(controlHeld: control, optionHeld: option)
+        }
+    case .keyDown:
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let control = event.flags.contains(.maskControl)
+        let option = event.flags.contains(.maskAlternate)
+        Task { @MainActor in
+            monitor.handleKeyDown(keyCode: keyCode, controlHeld: control, optionHeld: option)
         }
     default:
         break

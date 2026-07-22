@@ -1,15 +1,31 @@
+import ServiceManagement
 import SwiftUI
 import WispKit
+
+/// Actions the panel triggers on its owning controllers.
+struct MenuBarPanelActions {
+    var openMemoryWindow: (MemoryHistoryWindowController.Tab) -> Void = { _ in }
+    var openTextInput: () -> Void = {}
+    var quit: () -> Void = {}
+}
 
 /// Content of the menu bar dropdown panel: status, model picker, toggles,
 /// session token stats, and quick actions.
 struct MenuBarPanelView: View {
     @ObservedObject var engine: CompanionEngine
-    let onQuit: () -> Void
+    let actions: MenuBarPanelActions
 
     @State private var modelListExpanded = false
     @State private var doctorChecks: [DoctorCheck]?
     @State private var doctorRunning = false
+    @State private var loginItemEnabled = false
+    @State private var loginItemNeedsApproval = false
+
+    /// Launch-at-login only makes sense from the .app bundle; the bare CLI
+    /// binary has no bundle identity to register.
+    private var runningFromAppBundle: Bool {
+        Bundle.main.bundleIdentifier != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -143,10 +159,56 @@ struct MenuBarPanelView: View {
                     .font(.system(size: 12.5))
                     .foregroundStyle(.white.opacity(0.85))
             }
+            Toggle(isOn: loginItemBinding) {
+                Text("Start Wisp at login")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.white.opacity(runningFromAppBundle ? 0.85 : 0.4))
+            }
+            .disabled(!runningFromAppBundle)
+            .help(runningFromAppBundle ? "" : "Run from Wisp.app to enable")
+            if loginItemNeedsApproval {
+                Button {
+                    SMAppService.openSystemSettingsLoginItems()
+                } label: {
+                    Text("Needs approval in System Settings → Login Items")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Color(red: 0.95, green: 0.75, blue: 0.3))
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                .pointerOnHover()
+            }
         }
         .toggleStyle(.switch)
         .controlSize(.mini)
         .tint(Color(red: 0.5, green: 0.44, blue: 1.0))
+        .onAppear(perform: refreshLoginItemStatus)
+    }
+
+    private var loginItemBinding: Binding<Bool> {
+        Binding(
+            get: { loginItemEnabled },
+            set: { enable in
+                do {
+                    if enable {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try SMAppService.mainApp.unregister()
+                    }
+                } catch {
+                    // Status refresh below surfaces the real state (e.g.
+                    // requiresApproval) instead of a silently wrong toggle.
+                }
+                refreshLoginItemStatus()
+            }
+        )
+    }
+
+    private func refreshLoginItemStatus() {
+        guard runningFromAppBundle else { return }
+        let status = SMAppService.mainApp.status
+        loginItemEnabled = status == .enabled
+        loginItemNeedsApproval = status == .requiresApproval
     }
 
     private var tokenLine: some View {
@@ -156,19 +218,31 @@ struct MenuBarPanelView: View {
     }
 
     private var actionsRow: some View {
-        HStack(spacing: 8) {
-            panelActionButton("Memory", systemImage: "brain") {
-                let memoryURL = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".wisp/memory")
-                try? FileManager.default.createDirectory(at: memoryURL, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(memoryURL)
+        VStack(alignment: .leading, spacing: 8) {
+            if engine.conversationTurnCount > 0 {
+                panelActionButton("New conversation", systemImage: "plus.bubble") {
+                    engine.resetConversation()
+                }
             }
-            panelActionButton(doctorRunning ? "Checking…" : "Doctor", systemImage: "stethoscope") {
-                runDoctor()
+            HStack(spacing: 8) {
+                panelActionButton("Memory", systemImage: "brain") {
+                    actions.openMemoryWindow(.memory)
+                }
+                panelActionButton("History", systemImage: "clock.arrow.circlepath") {
+                    actions.openMemoryWindow(.history)
+                }
+                panelActionButton("Type", systemImage: "keyboard") {
+                    actions.openTextInput()
+                }
             }
-            Spacer()
-            panelActionButton("Quit", systemImage: "power") {
-                onQuit()
+            HStack(spacing: 8) {
+                panelActionButton(doctorRunning ? "Checking…" : "Doctor", systemImage: "stethoscope") {
+                    runDoctor()
+                }
+                Spacer()
+                panelActionButton("Quit", systemImage: "power") {
+                    actions.quit()
+                }
             }
         }
     }

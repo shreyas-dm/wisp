@@ -9,8 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarController: MenuBarController!
     private var overlayController: OverlayController!
     private var hotkeyMonitor: HotkeyMonitor!
+    private var textInputController: TextInputPanelController!
+    private var memoryHistoryController: MemoryHistoryWindowController!
     private var onboardingController: OnboardingWindowController?
-    private var escapeKeyMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let configStore = WispConfigStore()
@@ -19,22 +20,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine = CompanionEngine(configStore: configStore)
         overlayController = OverlayController(engine: engine)
         engine.overlay = overlayController
-        menuBarController = MenuBarController(engine: engine)
+        textInputController = TextInputPanelController(engine: engine)
+        memoryHistoryController = MemoryHistoryWindowController()
+
+        var actions = MenuBarPanelActions()
+        actions.openMemoryWindow = { [weak self] tab in
+            self?.memoryHistoryController.show(tab: tab)
+        }
+        actions.openTextInput = { [weak self] in
+            guard let self else { return }
+            self.textInputController.show(near: self.overlayController.orbScreenPointCocoa())
+        }
+        actions.quit = { NSApp.terminate(nil) }
+        menuBarController = MenuBarController(engine: engine, actions: actions)
 
         hotkeyMonitor = HotkeyMonitor(
             onPress: { [weak self] in self?.engine.hotkeyPressed() },
             onRelease: { [weak self] in self?.engine.hotkeyReleased() }
         )
-        hotkeyMonitor.start()
-
-        // Esc cancels an in-flight interaction when any Wisp window has key
-        // focus (system-wide Esc would require intrusive key taps).
-        escapeKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 {
-                self?.engine.cancelInteraction()
+        // Esc cancels an in-flight interaction system-wide (listen-only tap
+        // — nothing is swallowed, and idle presses are ignored here).
+        hotkeyMonitor.onEscape = { [weak self] in
+            guard let self else { return }
+            if self.engine.state != .idle {
+                self.engine.cancelInteraction()
             }
-            return event
         }
+        // ⌃⌥Space asks by typing. Holding ⌃⌥ starts push-to-talk first, so
+        // cancel that listening stub before showing the input.
+        hotkeyMonitor.onTextInputShortcut = { [weak self] in
+            guard let self else { return }
+            if self.engine.state == .listening {
+                self.engine.cancelInteraction()
+            }
+            guard self.engine.state == .idle else { return }
+            self.textInputController.toggle(near: self.overlayController.orbScreenPointCocoa())
+        }
+        hotkeyMonitor.start()
 
         let needsVoicePermissions = AVCaptureDevice.authorizationStatus(for: .audio) != .authorized
         if isFirstRun || !AXTreeCapture.isAccessibilityTrusted() || needsVoicePermissions {
@@ -44,9 +66,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         engine.persistSession()
-        if let escapeKeyMonitor {
-            NSEvent.removeMonitor(escapeKeyMonitor)
-        }
     }
 
     private func showOnboarding() {

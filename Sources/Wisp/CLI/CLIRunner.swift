@@ -15,7 +15,7 @@ enum CLIRunner {
 
         switch command {
         case "version", "--version", "-v":
-            print("wisp 0.1.0")
+            print("wisp 0.2.0")
             return 0
         case "snapshot":
             return await runSnapshot(rest)
@@ -219,6 +219,31 @@ enum CLIRunner {
                 maxDimension: config.screenshotMaxDimension
             ) {
                 images = [image]
+            }
+        }
+
+        // Same OCR fallback as the app: sparse tree + pixels available.
+        if config.ocrEnabled,
+           let captured = snapshot,
+           captured.elements.count < 12,
+           ScreenshotCapture.hasScreenRecordingPermission(),
+           !captured.displays.isEmpty {
+            var jpegForOCR = images.first?.jpegData
+            if jpegForOCR == nil {
+                jpegForOCR = (try? await ScreenshotCapture().captureDisplayJPEG(
+                    displayIndex: 0,
+                    maxDimension: config.screenshotMaxDimension
+                ))?.jpegData
+            }
+            if let jpegForOCR,
+               let ocrElements = try? await OCRCapture().recognizeText(
+                   inJPEG: jpegForOCR,
+                   displayFrame: captured.displays[0].frame
+               ),
+               !ocrElements.isEmpty {
+                let merged = OCRCapture.merge(ocrElements: ocrElements, into: captured)
+                snapshot = merged
+                snapshotBlock = SnapshotSerializer(tokenBudget: config.snapshotTokenBudget).serialize(merged)
             }
         }
 

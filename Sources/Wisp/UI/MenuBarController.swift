@@ -6,15 +6,18 @@ import SwiftUI
 @MainActor
 final class MenuBarController {
     private let engine: CompanionEngine
+    private let actions: MenuBarPanelActions
     private var statusItem: NSStatusItem?
     private var panel: NSPanel?
+    private var hostingView: NSHostingView<MenuBarPanelView>?
     private var outsideClickMonitor: Any?
     private var localClickMonitor: Any?
 
-    private let panelSize = NSSize(width: 300, height: 380)
+    private let panelWidth: CGFloat = 300
 
-    init(engine: CompanionEngine) {
+    init(engine: CompanionEngine, actions: MenuBarPanelActions) {
         self.engine = engine
+        self.actions = actions
         buildStatusItem()
     }
 
@@ -52,7 +55,7 @@ final class MenuBarController {
 
     private func buildPanel() -> NSPanel {
         let newPanel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: panelSize),
+            contentRect: NSRect(origin: .zero, size: NSSize(width: panelWidth, height: 380)),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -66,23 +69,32 @@ final class MenuBarController {
         newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         newPanel.becomesKeyOnlyIfNeeded = true
 
-        let hostingView = NSHostingView(
-            rootView: MenuBarPanelView(engine: engine, onQuit: { NSApp.terminate(nil) })
+        let hosting = NSHostingView(
+            rootView: MenuBarPanelView(engine: engine, actions: actions)
         )
-        hostingView.frame = NSRect(origin: .zero, size: panelSize)
-        newPanel.contentView = hostingView
+        newPanel.contentView = hosting
+        hostingView = hosting
         panel = newPanel
         return newPanel
+    }
+
+    /// The panel hugs its SwiftUI content (which grows with doctor results,
+    /// the new-conversation button, etc.).
+    private var panelSize: NSSize {
+        let fitting = hostingView?.fittingSize ?? NSSize(width: panelWidth, height: 380)
+        return NSSize(width: panelWidth, height: max(200, fitting.height))
     }
 
     private func positionPanel(_ panel: NSPanel) {
         guard let button = statusItem?.button, let buttonWindow = button.window else {
             return
         }
+        let size = panelSize
+        panel.setContentSize(size)
         let buttonFrame = buttonWindow.frame
         var origin = NSPoint(
-            x: buttonFrame.maxX - panelSize.width,
-            y: buttonFrame.minY - panelSize.height - 6
+            x: buttonFrame.maxX - size.width,
+            y: buttonFrame.minY - size.height - 6
         )
         if let screen = buttonWindow.screen {
             origin.x = max(screen.visibleFrame.minX + 8, origin.x)

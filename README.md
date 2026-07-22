@@ -50,8 +50,12 @@ optional, you dial cost with one setting:
 
 Follow-up snapshots only send what changed (`+` added / `~` changed / `-`
 removed), and history compaction drops old screenshots, so multi-turn
-conversations stay flat. Text-only models degrade automatically to
-`structure` mode — and still get the pointing superpower below.
+conversations stay flat. Snapshots also carry your selected text, the
+browser URL, and a list of other open windows. Text-only models degrade
+automatically to `structure` mode — and still get the pointing superpower
+below, because when the accessibility tree is sparse (canvas, video,
+games) Wisp runs **local OCR** (Apple Vision, on-device) and turns screen
+text into pointable elements.
 
 ### 2. It works with any model — including open-source
 
@@ -117,6 +121,12 @@ the reply streams into the bubble while your configured voice reads it
 (ElevenLabs when a key is set, the local system voice otherwise). When the
 answer involves something on screen — *"click Send invoice in the form"* —
 a pointer glides to the element and rings it.
+
+Prefer typing? **⌃⌥Space** opens a floating input. **Esc** cancels an
+in-flight answer anywhere. The orb drags anywhere and remembers its spot;
+the menu bar panel has the model picker, a Memory & History window (see and
+delete what Wisp remembers, review past conversations), "New conversation",
+and a launch-at-login toggle.
 
 Everything also works from the terminal:
 
@@ -195,6 +205,7 @@ Beyond profiles, the interesting knobs (all optional, shown with defaults):
   "screenContextMode": "hybrid",      // hybrid | structure | auto | screenshot
   "screenshotMaxDimension": 1024,     // longest side of the attached screenshot
   "snapshotTokenBudget": 1200,
+  "ocrEnabled": true,                 // local OCR when the AX tree is sparse
   "sttEngine": "auto",                // auto | elevenlabs | apple
   "ttsEngine": "auto",
   "elevenLabsVoiceID": "21m00Tcm4TlvDq8ikWAM"

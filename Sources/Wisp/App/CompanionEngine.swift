@@ -25,6 +25,9 @@ final class CompanionEngine: ObservableObject {
     @Published private(set) var audioLevel: Float = 0
     @Published private(set) var sessionInputTokens = 0
     @Published private(set) var sessionOutputTokens = 0
+    /// Number of turns in the current conversation; drives the menu panel's
+    /// "New conversation" affordance.
+    @Published private(set) var conversationTurnCount = 0
     @Published private(set) var activeProfileID: String
     @Published var voiceRepliesEnabled: Bool {
         didSet { persistConfigChanges() }
@@ -60,6 +63,9 @@ final class CompanionEngine: ObservableObject {
     private var pendingTranscriptForScreenshotRetry: String?
     private var idleDistillationTask: Task<Void, Never>?
     private var distilledMessageCount = 0
+    /// One provider instance per profile, reused across turns so the
+    /// warmup throttle and connection pool actually help.
+    private var cachedProvider: (profileID: String, provider: LLMProvider)?
 
     var profiles: [LLMModelProfile] { config.profiles }
 
@@ -114,11 +120,28 @@ final class CompanionEngine: ObservableObject {
         }
     }
 
+    private func provider(for profile: LLMModelProfile) -> LLMProvider {
+        if let cached = cachedProvider, cached.profileID == profile.id {
+            return cached.provider
+        }
+        let created = ProviderFactory.makeProvider(profile: profile, keyResolver: secrets)
+        cachedProvider = (profile.id, created)
+        return created
+    }
+
+    /// Pre-establish the provider connection while the user is speaking so
+    /// the first token lands sooner.
+    private func warmupActiveProvider() {
+        guard let profile = config.activeProfile else { return }
+        provider(for: profile).warmup()
+    }
+
     // MARK: - Hotkey entry points
 
     func hotkeyPressed() {
         guard state == .idle else { return }
         refreshVoiceEnginesIfNeeded()
+        warmupActiveProvider()
         cancelBubbleFade()
         state = .listening
         partialTranscript = ""
@@ -161,6 +184,7 @@ final class CompanionEngine: ObservableObject {
     func ask(_ text: String) {
         guard state == .idle, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         refreshVoiceEnginesIfNeeded()
+        warmupActiveProvider()
         cancelBubbleFade()
         bubbleText = ""
         overlay?.interactionStarted()
@@ -192,6 +216,23 @@ final class CompanionEngine: ObservableObject {
     func persistSession() {
         guard !history.isEmpty else { return }
         try? memory.recordSession(messages: history)
+    }
+
+    /// Clears the conversation and session counters, logging the finished
+    /// transcript first so nothing is lost.
+    func resetConversation() {
+        persistSession()
+        idleDistillationTask?.cancel()
+        idleDistillationTask = nil
+        history = []
+        previousSnapshot = nil
+        currentSnapshot = nil
+        snapshotBlockForTurn = nil
+        distilledMessageCount = 0
+        conversationTurnCount = 0
+        sessionInputTokens = 0
+        sessionOutputTokens = 0
+        presentTransientMessage("Fresh start.")
     }
 
     // MARK: - Turn pipeline
@@ -227,7 +268,7 @@ final class CompanionEngine: ObservableObject {
         }
 
         state = .thinking
-        let provider = ProviderFactory.makeProvider(profile: profile, keyResolver: secrets)
+        let provider = provider(for: profile)
         let promptBuilder = PromptBuilder(config: config)
 
         // Screen context per the configured mode: hybrid (default) sends the
@@ -257,6 +298,43 @@ final class CompanionEngine: ObservableObject {
                 if let capturedImage {
                     turnImages = [capturedImage]
                 }
+            }
+        }
+
+        // OCR fallback: a sparse accessibility tree with pixels available
+        // usually means canvas/video/game content. Recognize its text
+        // locally so any model — including text-only open models — can read
+        // and point at it (t-prefixed element IDs).
+        if config.ocrEnabled,
+           let snapshot = currentSnapshot,
+           snapshot.elements.count < 12,
+           !snapshot.elements.contains(where: { $0.role == .ocrText }),
+           ScreenshotCapture.hasScreenRecordingPermission() {
+            let displayIndex = focusedDisplayIndex()
+            var jpegForOCR = turnImages.first?.jpegData
+            if jpegForOCR == nil {
+                // Text-only profiles never attach a screenshot; capture one
+                // solely for local recognition — it is never sent anywhere.
+                jpegForOCR = (try? await screenshotCapture.captureDisplayJPEG(
+                    displayIndex: displayIndex,
+                    maxDimension: config.screenshotMaxDimension
+                ))?.jpegData
+            }
+            if let jpegForOCR,
+               snapshot.displays.indices.contains(displayIndex),
+               var ocrElements = try? await OCRCapture().recognizeText(
+                   inJPEG: jpegForOCR,
+                   displayFrame: snapshot.displays[displayIndex].frame
+               ),
+               !ocrElements.isEmpty {
+                for index in ocrElements.indices {
+                    ocrElements[index].displayIndex = displayIndex
+                }
+                let merged = OCRCapture.merge(ocrElements: ocrElements, into: snapshot)
+                currentSnapshot = merged
+                previousSnapshot = merged
+                snapshotBlockForTurn = SnapshotSerializer(tokenBudget: config.snapshotTokenBudget)
+                    .serialize(merged)
             }
         }
 
@@ -344,6 +422,7 @@ final class CompanionEngine: ObservableObject {
             history.append(request.messages.last ?? ChatMessage(role: .user, text: transcript))
             history.append(ChatMessage(role: .assistant, text: trimmedReply))
             history = PromptBuilder.compactHistory(history, turnLimit: config.historyTurnLimit)
+            conversationTurnCount = history.count / 2
         }
 
         if voiceRepliesEnabled {
@@ -446,8 +525,8 @@ final class CompanionEngine: ObservableObject {
             let newMessages = Array(self.history.suffix(from: startIndex))
             guard !newMessages.isEmpty else { return }
             self.distilledMessageCount = self.history.count
-            let provider = ProviderFactory.makeProvider(profile: profile, keyResolver: self.secrets)
-            await MemoryDistiller(store: self.memory).distill(messages: newMessages, using: provider)
+            await MemoryDistiller(store: self.memory)
+                .distill(messages: newMessages, using: self.provider(for: profile))
         }
     }
 
