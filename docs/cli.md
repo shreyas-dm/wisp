@@ -59,14 +59,17 @@ Checks everything and says what to fix:
 
 ```
 $ wisp doctor
-  ✓ config           ~/.wisp/config.json (6 profiles, active: claude)
-  ✓ accessibility    trusted
-  ✓ microphone       granted
-  ✓ speech           granted
-  ✓ screen recording granted (hybrid context sends a screenshot each turn)
-  ✓ api key          ANTHROPIC_API_KEY present (Keychain)
-  ✓ endpoint         https://api.anthropic.com reachable
-  ✓ voice            stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
+Wisp doctor
+  ✓ accessibility        trusted — screen snapshots available
+  ✓ screen recording     granted — hybrid screen context available
+  ✓ microphone           authorized
+  ✓ speech recognition   authorized
+  ✓ config               ~/.wisp/config.json
+  ✓ model profile        Claude Sonnet (claude-sonnet-5, anthropic)
+  ✓ api key              ANTHROPIC_API_KEY resolves
+  ✓ endpoint             https://api.anthropic.com reachable
+  ✓ voice engines        stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
+  ✓ tts voice            Samantha
 ```
 
 Exit code is non-zero when a required check fails, so it can gate scripts.

@@ -132,14 +132,17 @@ Looking at the Total column, the largest value is 12,480 in row 14
 → points at e31 "N14"
 
 $ wisp doctor
-  ✓ config           ~/.wisp/config.json (6 profiles, active: claude)
-  ✓ accessibility    trusted
-  ✓ microphone       granted
-  ✓ speech           granted
-  ✓ screen recording granted (hybrid context sends a screenshot each turn)
-  ✓ api key          ANTHROPIC_API_KEY present (Keychain)
-  ✓ endpoint         https://api.anthropic.com reachable
-  ✓ voice            stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
+Wisp doctor
+  ✓ accessibility        trusted — screen snapshots available
+  ✓ screen recording     granted — hybrid screen context available
+  ✓ microphone           authorized
+  ✓ speech recognition   authorized
+  ✓ config               ~/.wisp/config.json
+  ✓ model profile        Claude Sonnet (claude-sonnet-5, anthropic)
+  ✓ api key              ANTHROPIC_API_KEY resolves
+  ✓ endpoint             https://api.anthropic.com reachable
+  ✓ voice engines        stt: ElevenLabs (auto) · tts: ElevenLabs (auto)
+  ✓ tts voice            Samantha
 ```
 
 The full command reference is in [docs/cli.md](docs/cli.md).
