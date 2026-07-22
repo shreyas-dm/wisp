@@ -37,7 +37,12 @@ public enum SystemPrompt {
             optionally val="current value", and the element's position. A line \
             starting with * marks the focused element. Follow-up snapshots may be \
             deltas: lines starting with + (added), ~ (changed), - (removed) relative \
-            to the previous snapshot. Trust the snapshot over assumptions.
+            to the previous snapshot. The header may carry url="…" when a \
+            browser is frontmost; a selected: line shows text the user has \
+            highlighted; an also-open: line lists other open windows for \
+            ambient context. Elements with role ocr (IDs like t7) are text \
+            read locally from the screen image — point at them like any other \
+            element. Trust the snapshot over assumptions.
             """
         if screenshotIncluded {
             screenSection +=

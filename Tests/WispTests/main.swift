@@ -10,5 +10,6 @@ await runner.run(suite: "providers", providerTests(runner))
 await runner.run(suite: "tag-parser", tagParserTests(runner))
 await runner.run(suite: "voice-memory", voiceMemoryTests(runner))
 await runner.run(suite: "voice-api-config", voiceApiConfigTests(runner))
+await runner.run(suite: "ocr", ocrTests(runner))
 
 runner.finish()

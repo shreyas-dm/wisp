@@ -11,6 +11,13 @@ public struct ScreenSnapshot: Sendable, Equatable {
     public var windowTitle: String?
     /// ID of the element that currently has keyboard focus, if any.
     public var focusedElementID: String?
+    /// Text the user currently has selected in the focused element, if any
+    /// (truncated by the capturer).
+    public var selectedText: String?
+    /// Current page URL when the frontmost app is a known browser.
+    public var browserURL: String?
+    /// Other open windows ("App — Title"), ambient context for the model.
+    public var openWindows: [String]
     public var displays: [DisplayInfo]
     /// Flattened element tree in depth-first order.
     public var elements: [SnapshotElement]
@@ -21,6 +28,9 @@ public struct ScreenSnapshot: Sendable, Equatable {
         appBundleID: String? = nil,
         windowTitle: String? = nil,
         focusedElementID: String? = nil,
+        selectedText: String? = nil,
+        browserURL: String? = nil,
+        openWindows: [String] = [],
         displays: [DisplayInfo] = [],
         elements: [SnapshotElement] = [],
         capturedAt: Date = Date()
@@ -29,6 +39,9 @@ public struct ScreenSnapshot: Sendable, Equatable {
         self.appBundleID = appBundleID
         self.windowTitle = windowTitle
         self.focusedElementID = focusedElementID
+        self.selectedText = selectedText
+        self.browserURL = browserURL
+        self.openWindows = openWindows
         self.displays = displays
         self.elements = elements
         self.capturedAt = capturedAt
@@ -70,6 +83,9 @@ public enum ElementRole: String, Sendable, Codable, CaseIterable {
     case webArea = "web"
     case scrollArea = "scroll"
     case window = "window"
+    /// Text recognized from pixels by the local OCR fallback (IDs start
+    /// with "t" instead of "e"); pointable like any other element.
+    case ocrText = "ocr"
     case other = "el"
 }
 
