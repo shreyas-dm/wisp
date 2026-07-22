@@ -125,5 +125,17 @@ func tagParserTests(_ t: TestRunner) -> [TestCase] {
             t.expectEqual(tags(chunks), [.point(elementID: "e5")])
             t.expect(joinedText(chunks).hasSuffix(" then  done"), "surrounding text preserved")
         },
+
+        TestCase("OCR element IDs (t-prefix) are pointable") {
+            let chunks = parseWhole("read this line [[point:t7]] here")
+            t.expectEqual(tags(chunks), [.point(elementID: "t7")])
+            t.expectEqual(joinedText(chunks), "read this line  here")
+        },
+
+        TestCase("unknown ID prefixes are not point tags") {
+            let chunks = parseWhole("[[point:x7]]")
+            t.expectEqual(tags(chunks), [], "x-prefix rejected")
+            t.expectEqual(joinedText(chunks), "[[point:x7]]", "malformed tag surfaces as text")
+        },
     ]
 }

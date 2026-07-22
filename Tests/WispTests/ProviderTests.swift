@@ -313,5 +313,170 @@ func providerTests(_ t: TestRunner) -> [TestCase] {
             t.expectEqual(trimmed.count, 2, "turn limit caps messages")
             t.expectEqual(trimmed.last?.text, "answer two")
         },
+
+        // MARK: Real streaming through URLSession (StubHTTPProtocol)
+
+        TestCase("anthropic end-to-end stream with mid-event chunk splits") {
+            let sse = """
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":42}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}
+
+            event: message_delta
+            data: {"type":"message_delta","usage":{"output_tokens":7}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+
+            """
+            // 13-byte chunks guarantee every event is severed mid-line.
+            StubHTTPProtocol.reset(script: [.init(status: 200, chunks: chunked(sse, size: 13))])
+            let provider = AnthropicProvider(
+                profile: makeProfile(style: .anthropic, base: "https://api.anthropic.com", keyRef: "K"),
+                keyResolver: StubKeys(keys: ["K": "sk-test"]),
+                session: makeStubbedSession()
+            )
+            let request = LLMChatRequest(systemPrompt: "s", messages: [ChatMessage(role: .user, text: "hi")])
+            let (events, error) = await collectStream(provider.streamChat(request))
+            t.expect(error == nil, "no error, got \(String(describing: error))")
+            t.expectEqual(events, [
+                .textDelta("Hello"),
+                .textDelta(" world"),
+                .done(LLMUsage(inputTokens: 42, outputTokens: 7)),
+            ])
+        },
+
+        TestCase("openai end-to-end stream ignores reasoning, carries usage") {
+            let sse = """
+            data: {"choices":[{"delta":{"role":"assistant"}}]}
+
+            data: {"choices":[{"delta":{"content":"Hey"}}]}
+
+            data: {"choices":[{"delta":{"reasoning_content":"thinking..."}}]}
+
+            data: {"choices":[{"delta":{"content":" you"}}]}
+
+            data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":25}}
+
+            data: [DONE]
+
+
+            """
+            StubHTTPProtocol.reset(script: [.init(status: 200, chunks: chunked(sse, size: 17))])
+            let provider = OpenAICompatibleProvider(
+                profile: makeProfile(style: .openaiCompatible, base: "https://api.moonshot.ai/v1", keyRef: "MK"),
+                keyResolver: StubKeys(keys: ["MK": "mk-1"]),
+                session: makeStubbedSession()
+            )
+            let request = LLMChatRequest(systemPrompt: "s", messages: [ChatMessage(role: .user, text: "hi")])
+            let (events, error) = await collectStream(provider.streamChat(request))
+            t.expect(error == nil, "no error, got \(String(describing: error))")
+            t.expectEqual(events, [
+                .textDelta("Hey"),
+                .textDelta(" you"),
+                .done(LLMUsage(inputTokens: 100, outputTokens: 25)),
+            ])
+        },
+
+        TestCase("openai retries once without stream_options on 400") {
+            let happySSE = """
+            data: {"choices":[{"delta":{"content":"ok"}}]}
+
+            data: [DONE]
+
+
+            """
+            StubHTTPProtocol.reset(script: [
+                .init(
+                    status: 400,
+                    headers: ["Content-Type": "application/json"],
+                    chunks: [Data(#"{"error":{"message":"unknown field: stream_options"}}"#.utf8)]
+                ),
+                .init(status: 200, chunks: chunked(happySSE, size: 11)),
+            ])
+            let provider = OpenAICompatibleProvider(
+                profile: makeProfile(style: .openaiCompatible, base: "http://localhost:11434/v1"),
+                keyResolver: StubKeys(),
+                session: makeStubbedSession()
+            )
+            let request = LLMChatRequest(systemPrompt: "", messages: [ChatMessage(role: .user, text: "hi")])
+            let (events, error) = await collectStream(provider.streamChat(request))
+            t.expect(error == nil, "retry succeeds, got \(String(describing: error))")
+            t.expectEqual(events, [.textDelta("ok"), .done(nil)])
+
+            let logged = StubHTTPProtocol.loggedRequests
+            t.expectEqual(logged.count, 2, "exactly one retry")
+            let firstBody = String(decoding: logged.first?.body ?? Data(), as: UTF8.self)
+            let secondBody = String(decoding: logged.last?.body ?? Data(), as: UTF8.self)
+            t.expect(firstBody.contains("stream_options"), "first attempt includes stream_options")
+            t.expect(!secondBody.contains("stream_options"), "retry omits stream_options")
+        },
+
+        TestCase("non-2xx surfaces status and body") {
+            StubHTTPProtocol.reset(script: [
+                .init(
+                    status: 429,
+                    headers: ["Content-Type": "text/plain"],
+                    chunks: [Data("rate ".utf8), Data("limited".utf8)]
+                ),
+            ])
+            let provider = AnthropicProvider(
+                profile: makeProfile(style: .anthropic, base: "https://api.anthropic.com", keyRef: "K"),
+                keyResolver: StubKeys(keys: ["K": "sk-test"]),
+                session: makeStubbedSession()
+            )
+            let request = LLMChatRequest(systemPrompt: "", messages: [ChatMessage(role: .user, text: "hi")])
+            let (events, error) = await collectStream(provider.streamChat(request))
+            t.expect(events.isEmpty, "no events before the error")
+            guard case let LLMProviderError.httpError(status, body)? = error as? LLMProviderError else {
+                t.expect(false, "expected httpError, got \(String(describing: error))")
+                return
+            }
+            t.expectEqual(status, 429)
+            t.expect(body.contains("rate limited"), "body captured, got: \(body)")
+        },
+
+        TestCase("missing key fails before any network request") {
+            StubHTTPProtocol.reset(script: [])
+            let provider = OpenAICompatibleProvider(
+                profile: makeProfile(style: .openaiCompatible, base: "https://api.example.com/v1", keyRef: "NOPE"),
+                keyResolver: StubKeys(),
+                session: makeStubbedSession()
+            )
+            let request = LLMChatRequest(systemPrompt: "", messages: [ChatMessage(role: .user, text: "hi")])
+            let (events, error) = await collectStream(provider.streamChat(request))
+            t.expect(events.isEmpty, "no events for missing key")
+            t.expectEqual(error as? LLMProviderError, .missingAPIKey(ref: "NOPE"))
+            t.expectEqual(StubHTTPProtocol.loggedRequests.count, 0, "no request hit the wire")
+        },
+
+        TestCase("warmup fires one request per instance per minute") {
+            StubHTTPProtocol.reset(script: [
+                .init(status: 404, headers: [:], chunks: [Data()]),
+                .init(status: 404, headers: [:], chunks: [Data()]),
+            ])
+            let provider = AnthropicProvider(
+                profile: makeProfile(style: .anthropic, base: "https://api.anthropic.com", keyRef: "K"),
+                keyResolver: StubKeys(keys: ["K": "sk-test"]),
+                session: makeStubbedSession()
+            )
+            provider.warmup()
+            let countAfterFirst = await StubHTTPProtocol.waitForRequestCount(1)
+            t.expectEqual(countAfterFirst, 1, "first warmup reaches the stub")
+
+            provider.warmup()
+            // Give a would-be second request ample time to appear.
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            t.expectEqual(StubHTTPProtocol.loggedRequests.count, 1, "second warmup throttled")
+
+            let method = StubHTTPProtocol.loggedRequests.first?.request.httpMethod
+            t.expectEqual(method, "GET", "warmup is a tiny GET")
+        },
     ]
 }

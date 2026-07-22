@@ -105,7 +105,8 @@ public struct ResponseTagParser: Sendable {
         }
         if inner.hasPrefix("point:") {
             let payload = String(inner.dropFirst("point:".count)).trimmingCharacters(in: .whitespaces)
-            if payload.range(of: "^e\\d+$", options: .regularExpression) != nil {
+            // "e" = accessibility elements, "t" = OCR text elements.
+            if payload.range(of: "^[et]\\d+$", options: .regularExpression) != nil {
                 return .point(elementID: payload)
             }
             let parts = payload.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }

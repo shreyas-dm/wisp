@@ -90,3 +90,9 @@ public protocol APIKeyResolving: Sendable {
     /// Returns the key for `ref`, or nil if not stored yet.
     func apiKey(for ref: String) -> String?
 }
+
+public extension LLMProvider {
+    /// Pre-establish the TLS connection while the user is still speaking
+    /// so the first token arrives sooner. Default: no-op.
+    func warmup() {}
+}

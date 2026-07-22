@@ -7,10 +7,20 @@ import Foundation
 public final class OpenAICompatibleProvider: LLMProvider {
     public let profile: LLMModelProfile
     let keyResolver: APIKeyResolving
+    let session: URLSession
+    private let warmupThrottle = WarmupThrottle()
 
-    public init(profile: LLMModelProfile, keyResolver: APIKeyResolving) {
+    public init(profile: LLMModelProfile, keyResolver: APIKeyResolving, session: URLSession = .shared) {
         self.profile = profile
         self.keyResolver = keyResolver
+        self.session = session
+    }
+
+    /// Establishes DNS+TCP+TLS to the API host ahead of the first token,
+    /// at most once a minute. Fire-and-forget; any response is a success.
+    public func warmup() {
+        guard warmupThrottle.shouldWarmup() else { return }
+        WarmupThrottle.fireWarmupRequest(to: profile.baseURL, session: session)
     }
 
     public func streamChat(_ request: LLMChatRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
@@ -43,7 +53,7 @@ public final class OpenAICompatibleProvider: LLMProvider {
         continuation: AsyncThrowingStream<LLMStreamEvent, Error>.Continuation
     ) async throws {
         let urlRequest = try makeURLRequest(request, includeStreamUsage: includeStreamUsage)
-        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+        let (bytes, response) = try await session.bytes(for: urlRequest)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw LLMProviderError.malformedResponse("non-HTTP response")
         }

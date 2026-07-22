@@ -4,10 +4,20 @@ import Foundation
 public final class AnthropicProvider: LLMProvider {
     public let profile: LLMModelProfile
     let keyResolver: APIKeyResolving
+    let session: URLSession
+    private let warmupThrottle = WarmupThrottle()
 
-    public init(profile: LLMModelProfile, keyResolver: APIKeyResolving) {
+    public init(profile: LLMModelProfile, keyResolver: APIKeyResolving, session: URLSession = .shared) {
         self.profile = profile
         self.keyResolver = keyResolver
+        self.session = session
+    }
+
+    /// Establishes DNS+TCP+TLS to the API host ahead of the first token,
+    /// at most once a minute. Fire-and-forget; any response is a success.
+    public func warmup() {
+        guard warmupThrottle.shouldWarmup() else { return }
+        WarmupThrottle.fireWarmupRequest(to: profile.baseURL, session: session)
     }
 
     public func streamChat(_ request: LLMChatRequest) -> AsyncThrowingStream<LLMStreamEvent, Error> {
@@ -15,7 +25,7 @@ public final class AnthropicProvider: LLMProvider {
             let task = Task {
                 do {
                     let urlRequest = try self.makeURLRequest(request)
-                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                    let (bytes, response) = try await self.session.bytes(for: urlRequest)
                     guard let httpResponse = response as? HTTPURLResponse else {
                         throw LLMProviderError.malformedResponse("non-HTTP response")
                     }
