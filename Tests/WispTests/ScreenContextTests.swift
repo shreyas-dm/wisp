@@ -268,5 +268,127 @@ func screenContextTests(_ t: TestRunner) -> [TestCase] {
             t.expect(result.changed.first?.valueChanged == true, "value changed")
             t.expect(result.changed.first?.positionChanged == false, "position unchanged")
         },
+
+        // MARK: v0.2 context enrichment
+
+        TestCase("nil enrichment fields keep the v0.1 format exactly") {
+            let output = SnapshotSerializer(tokenBudget: 5000).serialize(invoiceSnapshot())
+            let expected = """
+            <screen> app=Safari window="Invoice – Stripe" display=1/1 1512x982
+            e1 window "Invoice – Stripe" (0,25)
+            * e2 field "Amount" val="420.00" (612,388 220x28)
+              e3 btn "Send invoice" (612,440 120x32)
+                e4 text val="Total due" (20,100)
+            </screen>
+            """
+            t.expectEqual(output, expected, "golden v0.1 compatibility")
+        },
+
+        TestCase("full format orders header url, also-open, selected, elements") {
+            let output = SnapshotSerializer(tokenBudget: 5000).serialize(enrichedSnapshot())
+            let expected = """
+            <screen> app=Safari window="Docs \\"draft\\"" url="https://example.com/docs?q=1" display=1/1 1512x982
+            also-open: "Mail — Inbox", "Xcode — wisp"
+            selected: "important selected words"
+            e1 window "Docs \\"draft\\"" (0,25)
+              e2 btn "Share" (10,60 80x30)
+            </screen>
+            """
+            t.expectEqual(output, expected, "golden enriched format")
+        },
+
+        TestCase("budget drops also-open before selected") {
+            var withoutAlsoOpen = enrichedSnapshot()
+            withoutAlsoOpen.openWindows = []
+            let target = SnapshotSerializer(tokenBudget: 5000).serialize(withoutAlsoOpen)
+            let budget = TokenEstimator.estimate(target)
+            let output = SnapshotSerializer(tokenBudget: budget).serialize(enrichedSnapshot())
+            t.expectEqual(output, target, "also-open sacrificed first, selection kept")
+        },
+
+        TestCase("budget drops selected before any element") {
+            var bare = enrichedSnapshot()
+            bare.openWindows = []
+            bare.selectedText = nil
+            let target = SnapshotSerializer(tokenBudget: 5000).serialize(bare)
+            let budget = TokenEstimator.estimate(target)
+            let output = SnapshotSerializer(tokenBudget: budget).serialize(enrichedSnapshot())
+            t.expectEqual(output, target, "both context lines gone, all elements intact")
+            t.expect(!output.contains("omitted"), "no element was dropped")
+        },
+
+        TestCase("selected line is capped to a single reasonable line") {
+            var snapshot = enrichedSnapshot()
+            snapshot.selectedText = String(repeating: "x", count: 1000)
+            let output = SnapshotSerializer(tokenBudget: 5000).serialize(snapshot)
+            let selectedLines = output.split(separator: "\n").filter { $0.hasPrefix("selected: ") }
+            t.expectEqual(selectedLines.count, 1, "exactly one selected line")
+            t.expect((selectedLines.first?.count ?? 0) <= 400, "line capped: \(selectedLines.first?.count ?? 0)")
+            t.expect(selectedLines.first?.hasSuffix("…\"") == true, "ellipsis marks truncation")
+        },
+
+        TestCase("delta reports selection change, never also-open") {
+            var previous = enrichedSnapshot()
+            previous.selectedText = "old words"
+            var current = enrichedSnapshot()
+            current.selectedText = "new words"
+            let output = SnapshotSerializer(tokenBudget: 5000).serializeDelta(from: previous, to: current)
+            t.expect(output.hasPrefix("<screen delta> app=Safari"), "is a delta: \(output)")
+            t.expect(output.contains("~ selected: \"new words\""), "selection change line present")
+            t.expect(!output.contains("also-open"), "also-open never in deltas")
+        },
+
+        TestCase("delta reports selection removal") {
+            var previous = enrichedSnapshot()
+            previous.selectedText = "was selected"
+            var current = enrichedSnapshot()
+            current.selectedText = nil
+            let output = SnapshotSerializer(tokenBudget: 5000).serializeDelta(from: previous, to: current)
+            t.expect(output.contains("\n- selected\n"), "selection removal line present: \(output)")
+        },
+
+        TestCase("delta omits selection when unchanged and keeps url in header") {
+            var previous = enrichedSnapshot()
+            var current = enrichedSnapshot()
+            current.elements[1].value = "v2"
+            previous.elements[1].value = "v1"
+            let output = SnapshotSerializer(tokenBudget: 5000).serializeDelta(from: previous, to: current)
+            t.expect(!output.contains("selected"), "no selection lines when unchanged")
+            t.expect(output.hasPrefix("<screen delta> app=Safari window=\"Docs \\\"draft\\\"\" url=\"https://example.com/docs?q=1\""), "delta header carries url: \(output)")
+        },
+
+        TestCase("url sanitizer truncates monster queries only") {
+            let longQuery = "https://shop.example.com/results?" + String(repeating: "utm=x&", count: 40)
+            let sanitizedLong = AXTreeCapture.sanitizeURLString(URL(string: longQuery)!)
+            t.expect(sanitizedLong.hasSuffix("…"), "long query truncated")
+            t.expect(sanitizedLong.count < longQuery.count, "shorter than original")
+            t.expect(sanitizedLong.hasPrefix("https://shop.example.com/results?"), "path intact")
+            let short = "https://example.com/a?b=1"
+            t.expectEqual(AXTreeCapture.sanitizeURLString(URL(string: short)!), short, "short query untouched")
+        },
+
+        TestCase("selection normalizer collapses whitespace and caps length") {
+            t.expectEqual(AXTreeCapture.normalizeSelection("  a\n\n b\tc  "), "a b c")
+            let long = AXTreeCapture.normalizeSelection(String(repeating: "y", count: 400))
+            t.expectEqual(long.count, 300, "capped at 300")
+            t.expect(long.hasSuffix("…"), "ellipsis on cap")
+        },
     ]
+}
+
+/// Fixture with every v0.2 enrichment populated.
+private func enrichedSnapshot() -> ScreenSnapshot {
+    ScreenSnapshot(
+        appName: "Safari",
+        appBundleID: "com.apple.Safari",
+        windowTitle: "Docs \"draft\"",
+        selectedText: "important selected words",
+        browserURL: "https://example.com/docs?q=1",
+        openWindows: ["Mail — Inbox", "Xcode — wisp"],
+        displays: [mainDisplay],
+        elements: [
+            el("e1", .window, "Docs \"draft\"", x: 0, y: 25, w: 1512, h: 957, depth: 0),
+            el("e2", .button, "Share", x: 10, y: 60, w: 80, h: 30, depth: 1, interactive: true),
+        ]
+    )
 }

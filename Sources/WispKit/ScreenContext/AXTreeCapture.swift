@@ -56,6 +56,7 @@ public final class AXTreeCapture {
         let appElement = AXUIElementCreateApplication(frontmostApp.processIdentifier)
         let displays = Self.currentDisplays()
         let focusedElement = Self.copyElement(appElement, kAXFocusedUIElementAttribute)
+        let selectedText = focusedElement.flatMap { Self.selectedText(of: $0) }
 
         let focusedWindow = Self.copyElement(appElement, kAXFocusedWindowAttribute)
         var windows = Self.copyElementArray(appElement, kAXWindowsAttribute)
@@ -75,6 +76,7 @@ public final class AXTreeCapture {
             screenUnion: displays.reduce(CGRect.null) { $0.union($1.frame) },
             displays: displays,
             focusedElement: focusedElement,
+            captureBrowserURL: Self.browserBundleIDs.contains(frontmostApp.bundleIdentifier ?? ""),
             limits: limits
         )
 
@@ -83,11 +85,16 @@ public final class AXTreeCapture {
             if state.exhausted { break }
         }
 
+        let openWindows = Self.collectOpenWindows(excluding: frontmostApp.processIdentifier)
+
         return ScreenSnapshot(
             appName: frontmostApp.localizedName ?? "Unknown",
             appBundleID: frontmostApp.bundleIdentifier,
             windowTitle: windowTitle,
             focusedElementID: state.focusedElementID,
+            selectedText: selectedText,
+            browserURL: state.browserURL,
+            openWindows: openWindows,
             displays: displays,
             elements: state.elements,
             capturedAt: Date()
@@ -99,11 +106,13 @@ public final class AXTreeCapture {
     private struct TraversalState {
         var elements: [SnapshotElement] = []
         var focusedElementID: String?
+        var browserURL: String?
         var exhausted = false
         let deadline: Date
         let screenUnion: CGRect
         let displays: [DisplayInfo]
         let focusedElement: AXUIElement?
+        let captureBrowserURL: Bool
         let limits: Limits
     }
 
@@ -125,6 +134,13 @@ public final class AXTreeCapture {
 
         let axRole = Self.copyString(element, kAXRoleAttribute) ?? ""
         let frame = Self.frame(of: element)
+
+        // The first web area of a browser knows the page URL.
+        if state.captureBrowserURL, state.browserURL == nil, axRole == "AXWebArea",
+           let urlValue = Self.copyAttribute(element, kAXURLAttribute),
+           let url = urlValue as? URL {
+            state.browserURL = Self.sanitizeURLString(url)
+        }
 
         var childDepth = emittedDepth
         var shouldEmit = false
@@ -300,7 +316,7 @@ public final class AXTreeCapture {
         return nil
     }
 
-    static func truncate(_ text: String, to limit: Int) -> String {
+    nonisolated static func truncate(_ text: String, to limit: Int) -> String {
         guard text.count > limit else { return text }
         return String(text.prefix(limit - 1)) + "…"
     }
@@ -348,5 +364,89 @@ public final class AXTreeCapture {
             return display.index
         }
         return 0
+    }
+
+    // MARK: - Selected text
+
+    /// Selected text of the focused element: kAXSelectedText first, then a
+    /// substring of kAXValue via kAXSelectedTextRange. Best effort, nil on
+    /// anything unexpected.
+    static func selectedText(of element: AXUIElement) -> String? {
+        if let selected = copyAttribute(element, kAXSelectedTextAttribute) as? String {
+            let cleaned = normalizeSelection(selected)
+            if !cleaned.isEmpty { return cleaned }
+        }
+        guard let value = copyAttribute(element, kAXValueAttribute) as? String,
+              let rangeRef = copyAttribute(element, kAXSelectedTextRangeAttribute),
+              CFGetTypeID(rangeRef) == AXValueGetTypeID()
+        else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue((rangeRef as! AXValue), .cfRange, &range), range.length > 0 else { return nil }
+        let nsValue = value as NSString
+        guard range.location >= 0, range.location + range.length <= nsValue.length else { return nil }
+        let substring = nsValue.substring(with: NSRange(location: range.location, length: range.length))
+        let cleaned = normalizeSelection(substring)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    /// Collapses whitespace runs and caps selection length.
+    nonisolated static func normalizeSelection(_ text: String) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        return truncate(collapsed, to: 300)
+    }
+
+    // MARK: - Browser URL
+
+    static let browserBundleIDs: Set<String> = [
+        "com.apple.Safari",
+        "com.google.Chrome",
+        "company.thebrowser.Browser",
+        "com.microsoft.edgemac",
+        "com.brave.Browser",
+        "org.mozilla.firefox",
+        "com.vivaldi.Vivaldi",
+        "com.operasoftware.Opera",
+    ]
+
+    /// Keeps scheme+host+path intact and truncates monster query strings —
+    /// tracking parameters carry no meaning for the model.
+    nonisolated static func sanitizeURLString(_ url: URL) -> String {
+        let full = url.absoluteString
+        guard let queryStart = full.firstIndex(of: "?") else { return full }
+        let query = full[full.index(after: queryStart)...]
+        guard query.count > 100 else { return full }
+        return String(full[..<queryStart]) + "?" + query.prefix(100) + "…"
+    }
+
+    // MARK: - Open windows
+
+    /// Ambient context: one line per other visible app ("App — Window
+    /// Title"). Strictly time-boxed — a hung app must not stall capture, so
+    /// each app element gets a short messaging timeout and the whole scan
+    /// bails at its deadline.
+    static func collectOpenWindows(
+        excluding frontmostPID: pid_t,
+        budget: TimeInterval = 0.05,
+        appLimit: Int = 8,
+        listLimit: Int = 6
+    ) -> [String] {
+        let deadline = Date().addingTimeInterval(budget)
+        var results: [String] = []
+        let otherApps = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.processIdentifier != frontmostPID
+        }
+        for app in otherApps.prefix(appLimit) {
+            if Date() >= deadline || results.count >= listLimit { break }
+            guard let appName = app.localizedName, !appName.isEmpty else { continue }
+            let appElement = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(appElement, 0.02)
+            let windowTitles = copyElementArray(appElement, kAXWindowsAttribute)
+                .compactMap { copyString($0, kAXTitleAttribute) }
+            guard let title = windowTitles.first(where: { !$0.isEmpty }) else { continue }
+            results.append("\(appName) — \(truncate(title, to: 60))")
+        }
+        return results
     }
 }

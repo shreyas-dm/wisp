@@ -6,12 +6,17 @@ import CoreGraphics
 ///
 /// Full format:
 /// ```
-/// <screen> app=Safari window="Invoice – Stripe" display=1/2 1512x982
+/// <screen> app=Safari window="Invoice – Stripe" url="https://…" display=1/2 1512x982
+/// also-open: "Mail — Inbox", "Xcode — wisp"
+/// selected: "the text the user highlighted"
 /// e1 window "Invoice – Stripe" (0,25)
 /// * e18 field "Amount" val="420.00" (612,388 220x28)
 ///   e19 btn "Send invoice" (612,440 120x32)
 /// </screen>
 /// ```
+/// `url=` appears only for browsers; `also-open:`/`selected:` only when
+/// present. Under budget pressure those two lines are dropped before any
+/// element line — also-open first, selection second.
 /// The focused element's line starts with `* ` (no indentation) so it is
 /// always easy to spot. All other lines are indented two spaces per tree
 /// level (capped at six levels). Sizes are only included for interactive
@@ -20,12 +25,15 @@ import CoreGraphics
 /// Delta format (against the previous snapshot):
 /// ```
 /// <screen delta> app=Safari window="Invoice – Stripe"
+/// ~ selected: "new selection"
 /// + e21 btn "Confirm" (700,500 90x30)
 /// ~ e18 val="500.00"
 /// - e7
 /// unchanged: 38 elements
 /// </screen>
 /// ```
+/// A selection change emits `~ selected: "…"` (or `- selected` when it
+/// vanished); the also-open list never appears in deltas.
 /// Budgeting: if the block exceeds `tokenBudget`, lines are dropped in
 /// priority order — deepest static text first, then decorative
 /// images/groups, then other non-interactive elements, and interactive
@@ -59,9 +67,17 @@ public struct SnapshotSerializer: Sendable {
             }
 
         var droppedIndices = Set<Int>()
+        var includeAlsoOpen = !snapshot.openWindows.isEmpty
+        var includeSelected = snapshot.selectedText != nil
 
         func assemble() -> String {
             var lines: [String] = [header]
+            if includeAlsoOpen {
+                lines.append(Self.alsoOpenLine(snapshot.openWindows))
+            }
+            if includeSelected, let selectedText = snapshot.selectedText {
+                lines.append(Self.selectedLine(selectedText))
+            }
             for (index, element) in snapshot.elements.enumerated() where !droppedIndices.contains(index) {
                 lines.append(Self.elementLine(element, isFocused: element.id == snapshot.focusedElementID))
             }
@@ -73,6 +89,16 @@ public struct SnapshotSerializer: Sendable {
         }
 
         var block = assemble()
+        // Context lines go before any element is sacrificed: also-open is
+        // the most expendable, the user's selection the next.
+        if TokenEstimator.estimate(block) > tokenBudget, includeAlsoOpen {
+            includeAlsoOpen = false
+            block = assemble()
+        }
+        if TokenEstimator.estimate(block) > tokenBudget, includeSelected {
+            includeSelected = false
+            block = assemble()
+        }
         var queuePosition = 0
         while TokenEstimator.estimate(block) > tokenBudget && queuePosition < dropQueue.count {
             droppedIndices.insert(dropQueue[queuePosition])
@@ -95,6 +121,15 @@ public struct SnapshotSerializer: Sendable {
         let diff = SnapshotDiff.diff(previous: previous.elements, current: current.elements)
 
         var deltaLines: [String] = []
+        // Selection changes ride along with element deltas; the also-open
+        // list is ambient context and never repeated in deltas.
+        if previous.selectedText != current.selectedText {
+            if let selectedText = current.selectedText {
+                deltaLines.append("~ " + Self.selectedLine(selectedText))
+            } else {
+                deltaLines.append("- selected")
+            }
+        }
         for element in diff.added {
             deltaLines.append("+ " + Self.elementBody(element))
         }
@@ -124,6 +159,9 @@ public struct SnapshotSerializer: Sendable {
         if let windowTitle = current.windowTitle {
             header += " window=\"\(Self.escape(windowTitle))\""
         }
+        if let browserURL = current.browserURL {
+            header += " url=\"\(Self.escape(browserURL))\""
+        }
 
         var lines = [header]
         lines.append(contentsOf: deltaLines)
@@ -139,6 +177,9 @@ public struct SnapshotSerializer: Sendable {
         if let windowTitle = snapshot.windowTitle {
             header += " window=\"\(escape(windowTitle))\""
         }
+        if let browserURL = snapshot.browserURL {
+            header += " url=\"\(escape(browserURL))\""
+        }
         if !snapshot.displays.isEmpty {
             let anchor = snapshot.elements.first { $0.role == .window } ?? snapshot.elements.first
             let displayIndex = anchor?.displayIndex ?? 0
@@ -149,6 +190,22 @@ public struct SnapshotSerializer: Sendable {
             }
         }
         return header
+    }
+
+    /// `also-open: "Mail — Inbox", "Xcode — wisp"` — ambient context.
+    static func alsoOpenLine(_ openWindows: [String]) -> String {
+        "also-open: " + openWindows.map { "\"\(escape($0))\"" }.joined(separator: ", ")
+    }
+
+    /// `selected: "…"` — what the user has highlighted. The raw text is
+    /// capped again here so this stays a single reasonable line even if a
+    /// capturer ever passes something longer.
+    static func selectedLine(_ selectedText: String) -> String {
+        var capped = selectedText
+        if capped.count > 380 {
+            capped = String(capped.prefix(379)) + "…"
+        }
+        return "selected: \"\(escape(capped))\""
     }
 
     /// One serialized element line including focus marker / indentation.
