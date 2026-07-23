@@ -49,12 +49,40 @@ public final class MetricsLog: @unchecked Sendable {
     }
 
     public func append(_ metrics: TurnMetrics) {
-        // TODO(fork-core): implement (atomic append, ISO dates, swallow errors).
+        lock.lock()
+        defer { lock.unlock() }
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard var lineData = try? encoder.encode(metrics) else { return }
+        lineData.append(Data("\n".utf8))
+
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        if !fileManager.fileExists(atPath: fileURL.path) {
+            fileManager.createFile(atPath: fileURL.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: fileURL) else { return }
+        defer { try? handle.close() }
+        _ = try? handle.seekToEnd()
+        try? handle.write(contentsOf: lineData)
     }
 
     /// Recent entries, newest last (for the menu panel and `wisp doctor`).
     public func recent(limit: Int = 50) -> [TurnMetrics] {
-        // TODO(fork-core): implement.
-        []
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return content.components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .suffix(limit)
+            .compactMap { try? decoder.decode(TurnMetrics.self, from: Data($0.utf8)) }
     }
 }

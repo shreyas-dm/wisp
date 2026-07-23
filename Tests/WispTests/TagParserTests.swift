@@ -137,5 +137,68 @@ func tagParserTests(_ t: TestRunner) -> [TestCase] {
             t.expectEqual(tags(chunks), [], "x-prefix rejected")
             t.expectEqual(joinedText(chunks), "[[point:x7]]", "malformed tag surfaces as text")
         },
+
+        TestCase("step tag parses with element ID and instruction") {
+            let chunks = parseWhole("Here's how. [[step:e5:Open the File menu]][[step:e9:Choose Export…]]")
+            t.expectEqual(tags(chunks), [
+                .step(elementID: "e5", instruction: "Open the File menu"),
+                .step(elementID: "e9", instruction: "Choose Export…"),
+            ])
+            t.expectEqual(joinedText(chunks), "Here's how. ")
+        },
+
+        TestCase("step tag survives a split at every offset") {
+            let full = "Go [[step:e12:Click the Save button]] on"
+            for cut in 0...full.count {
+                var parser = ResponseTagParser()
+                let head = String(full.prefix(cut))
+                let tail = String(full.suffix(full.count - cut))
+                let chunks = parser.consume(head) + parser.consume(tail) + parser.finish()
+                t.expectEqual(
+                    tags(chunks),
+                    [.step(elementID: "e12", instruction: "Click the Save button")],
+                    "split at \(cut)"
+                )
+            }
+        },
+
+        TestCase("step without an instruction is literal text") {
+            let chunks = parseWhole("[[step:e5]]")
+            t.expectEqual(tags(chunks), [])
+            t.expectEqual(joinedText(chunks), "[[step:e5]]")
+        },
+
+        TestCase("step accepts OCR t-prefixed targets, rejects other prefixes") {
+            let okChunks = parseWhole("[[step:t3:Read the banner text]]")
+            t.expectEqual(tags(okChunks), [.step(elementID: "t3", instruction: "Read the banner text")])
+            let badChunks = parseWhole("[[step:z3:Nope]]")
+            t.expectEqual(tags(badChunks), [])
+            t.expectEqual(joinedText(badChunks), "[[step:z3:Nope]]")
+        },
+
+        TestCase("step instruction may itself contain colons") {
+            let chunks = parseWhole("[[step:e2:Set the ratio to 16:9]]")
+            t.expectEqual(tags(chunks), [.step(elementID: "e2", instruction: "Set the ratio to 16:9")])
+        },
+
+        TestCase("recall tag parses and empty recall is literal") {
+            let chunks = parseWhole("[[recall:docker error yesterday]]")
+            t.expectEqual(tags(chunks), [.recall(query: "docker error yesterday")])
+            t.expectEqual(joinedText(chunks), "")
+            let empty = parseWhole("[[recall:]]")
+            t.expectEqual(tags(empty), [])
+            t.expectEqual(joinedText(empty), "[[recall:]]")
+        },
+
+        TestCase("recall tag survives streaming splits") {
+            let full = "[[recall:the site I showed you]]"
+            for cut in 0...full.count {
+                var parser = ResponseTagParser()
+                let head = String(full.prefix(cut))
+                let tail = String(full.suffix(full.count - cut))
+                let chunks = parser.consume(head) + parser.consume(tail) + parser.finish()
+                t.expectEqual(tags(chunks), [.recall(query: "the site I showed you")], "split at \(cut)")
+            }
+        },
     ]
 }

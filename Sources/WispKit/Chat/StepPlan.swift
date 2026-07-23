@@ -36,14 +36,56 @@ public struct StepPlanBuilder: Sendable {
 
     /// Heuristic: does the change from `previous` to `current` suggest the
     /// user performed `step`? True when the target element disappeared, its
-    /// value changed, the focused element moved to/past it, or the window
-    /// title changed (navigation).
+    /// value changed, keyboard focus reached it, or the window/app changed
+    /// (navigation). OCR-targeted steps ("t…" IDs) only advance on
+    /// navigation or when their text left the screen — OCR IDs are not
+    /// stable across snapshots, so element-level matching would misfire.
     public static func looksCompleted(
         step: WalkthroughStep,
         previous: ScreenSnapshot,
         current: ScreenSnapshot
     ) -> Bool {
-        // TODO(fork-core): implement the diff heuristic.
-        false
+        // Navigation: a new window or app means the previous action landed.
+        if current.windowTitle != previous.windowTitle || current.appName != previous.appName {
+            return true
+        }
+
+        guard let target = previous.elements.first(where: { $0.id == step.elementID }) else {
+            // The plan referenced an element the snapshot never had (stale
+            // or hallucinated) — nothing further to judge.
+            return false
+        }
+
+        if target.role == .ocrText {
+            let targetText = Self.normalized(target.value ?? "")
+            guard !targetText.isEmpty else { return false }
+            let stillVisible = current.elements.contains { element in
+                element.role == .ocrText && Self.normalized(element.value ?? "").contains(targetText)
+            }
+            return !stillVisible
+        }
+
+        let diff = SnapshotDiff.diff(previous: previous.elements, current: current.elements)
+
+        // Disappeared: menus close, dialogs dismiss, buttons vanish.
+        if diff.removed.contains(where: { $0.id == target.id }) {
+            return true
+        }
+
+        if let match = diff.matches.first(where: { $0.previous.id == target.id }) {
+            // Value changed: the user typed/toggled/selected.
+            if match.valueChanged { return true }
+            // Focus reached the target field.
+            if match.current.isFocused { return true }
+            if let focusedID = current.focusedElementID, focusedID == match.current.id { return true }
+        }
+        return false
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }
