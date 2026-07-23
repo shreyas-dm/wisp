@@ -6,6 +6,7 @@ import WispKit
 struct MenuBarPanelActions {
     var openMemoryWindow: (MemoryHistoryWindowController.Tab) -> Void = { _ in }
     var openTextInput: () -> Void = {}
+    var openInstructions: () -> Void = {}
     var quit: () -> Void = {}
 }
 
@@ -159,6 +160,12 @@ struct MenuBarPanelView: View {
                     .font(.system(size: 12.5))
                     .foregroundStyle(.white.opacity(0.85))
             }
+            Toggle(isOn: $engine.activityLogEnabled) {
+                Text("Activity log (local)")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            .help("Remembers which apps you were using so you can ask about past work. Never leaves this Mac.")
             Toggle(isOn: loginItemBinding) {
                 Text("Start Wisp at login")
                     .font(.system(size: 12.5))
@@ -212,9 +219,17 @@ struct MenuBarPanelView: View {
     }
 
     private var tokenLine: some View {
-        Text("session · ↑\(formatTokens(engine.sessionInputTokens)) ↓\(formatTokens(engine.sessionOutputTokens)) tokens")
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.4))
+        VStack(alignment: .leading, spacing: 3) {
+            Text("session · ↑\(formatTokens(engine.sessionInputTokens)) ↓\(formatTokens(engine.sessionOutputTokens)) tokens")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.4))
+            if let lastTurnSummary = engine.lastTurnSummary {
+                Text(lastTurnSummary)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.28))
+                    .lineLimit(1)
+            }
+        }
     }
 
     private var actionsRow: some View {
@@ -236,6 +251,9 @@ struct MenuBarPanelView: View {
                 }
             }
             HStack(spacing: 8) {
+                panelActionButton("Instructions", systemImage: "text.alignleft") {
+                    actions.openInstructions()
+                }
                 panelActionButton(doctorRunning ? "Checking…" : "Doctor", systemImage: "stethoscope") {
                     runDoctor()
                 }
@@ -316,6 +334,7 @@ struct MenuBarPanelView: View {
         case .listening: return Color(red: 0.3, green: 0.85, blue: 0.5)
         case .thinking: return Color(red: 0.95, green: 0.75, blue: 0.3)
         case .responding, .speaking: return Color(red: 0.4, green: 0.6, blue: 0.98)
+        case .walkthrough: return Color(red: 0.55, green: 0.5, blue: 1.0)
         }
     }
 
@@ -326,6 +345,7 @@ struct MenuBarPanelView: View {
         case .thinking: return "thinking"
         case .responding: return "responding"
         case .speaking: return "speaking"
+        case .walkthrough(let stepIndex, let total): return "step \(stepIndex)/\(total)"
         }
     }
 

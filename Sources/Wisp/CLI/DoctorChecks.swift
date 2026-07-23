@@ -160,6 +160,25 @@ enum DoctorChecks {
             ))
         }
 
+        // Activity log + turn metrics (informational).
+        checks.append(DoctorCheck(
+            name: "activity log",
+            status: .neutral,
+            detail: config.activityLogEnabled
+                ? "on — local only (~/.wisp/memory/activity)"
+                : "off (enable in the menu panel for recall of past work)",
+            critical: false
+        ))
+        let recentMetrics = MetricsLog().recent(limit: 50)
+        checks.append(DoctorCheck(
+            name: "turn metrics",
+            status: .neutral,
+            detail: recentMetrics.isEmpty
+                ? "none recorded yet (~/.wisp/metrics.jsonl)"
+                : "\(recentMetrics.count) recent turns · last: \(recentMetrics.last?.summaryLine ?? "–")",
+            critical: false
+        ))
+
         // Voice engines (STT/TTS selection incl. ElevenLabs upgrade path).
         let voiceDescriptions = VoiceEngineFactory.engineDescriptions(config: config, secrets: SecretsStore())
         checks.append(DoctorCheck(

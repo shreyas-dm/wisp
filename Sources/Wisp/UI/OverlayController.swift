@@ -41,6 +41,17 @@ final class OrbPositionModel: ObservableObject {
             y: viewSize.height - Self.margin - Self.orbDiameter / 2
         )
     }
+
+    /// Where the bubble/step-chip centers, given the orb position — shared
+    /// by the view (layout) and the controller (hover hit-testing). Flips
+    /// below the orb when the orb sits near the top edge.
+    static func bubbleCenter(orbCenter: CGPoint, viewSize: CGSize) -> CGPoint {
+        let halfWidth: CGFloat = 190
+        let x = min(max(orbCenter.x, halfWidth + 12), viewSize.width - halfWidth - 12)
+        let aboveY = orbCenter.y - orbDiameter / 2 - 16 - 60
+        let y = aboveY > 80 ? aboveY : orbCenter.y + orbDiameter / 2 + 16 + 60
+        return CGPoint(x: x, y: y)
+    }
 }
 
 /// Hosts the click-through overlay: the orb companion, the response bubble,
@@ -245,7 +256,24 @@ final class OverlayController {
         let orbCenter = orbPosition.center
         let hoverRadius = OrbPositionModel.orbDiameter / 2 + 8
         let distance = hypot(localPoint.x - orbCenter.x, localPoint.y - orbCenter.y)
-        let shouldReceiveMouse = distance <= hoverRadius || orbPosition.isDragging
+        var shouldReceiveMouse = distance <= hoverRadius || orbPosition.isDragging
+
+        // During a walkthrough the step chip has real buttons — accept
+        // mouse events over its area too.
+        if case .walkthrough = engine.state {
+            let chipCenter = OrbPositionModel.bubbleCenter(
+                orbCenter: orbCenter,
+                viewSize: orbPosition.viewSize
+            )
+            let chipRect = CGRect(
+                x: chipCenter.x - 190, y: chipCenter.y - 60,
+                width: 380, height: 120
+            )
+            if chipRect.contains(localPoint) {
+                shouldReceiveMouse = true
+            }
+        }
+
         if panel.ignoresMouseEvents == shouldReceiveMouse {
             panel.ignoresMouseEvents = !shouldReceiveMouse
         }

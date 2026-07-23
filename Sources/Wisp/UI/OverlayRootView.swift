@@ -64,26 +64,41 @@ struct OverlayRootView: View {
 
     @ViewBuilder
     private func bubble(in size: CGSize, orbCenter: CGPoint) -> some View {
-        let showsTranscript = engine.state == .listening && !engine.partialTranscript.isEmpty
-        let showsListeningHint = engine.state == .listening && engine.partialTranscript.isEmpty
-        let showsReply = !engine.bubbleText.isEmpty
-        if showsReply || showsTranscript || showsListeningHint {
-            // Anchored above the orb, clamped so it never leaves the screen;
-            // flips below the orb when the orb is near the top edge.
-            let halfWidth: CGFloat = 190
-            let bubbleX = min(max(orbCenter.x, halfWidth + 12), size.width - halfWidth - 12)
-            let aboveY = orbCenter.y - orbDiameter / 2 - 16 - 60
-            let bubbleY = aboveY > 80 ? aboveY : orbCenter.y + orbDiameter / 2 + 16 + 60
-            ResponseBubbleView(
-                text: showsReply ? engine.bubbleText : (showsTranscript ? engine.partialTranscript : "Listening…"),
-                isSecondary: !showsReply
+        // Anchored above the orb, clamped so it never leaves the screen;
+        // flips below the orb when the orb is near the top edge. The same
+        // math drives the controller's hover hit-testing.
+        let bubbleCenter = OrbPositionModel.bubbleCenter(orbCenter: orbCenter, viewSize: size)
+
+        if case .walkthrough(let stepIndex, let total) = engine.state,
+           let step = engine.currentWalkthroughStep {
+            StepChipView(
+                stepIndex: stepIndex,
+                total: total,
+                instruction: step.instruction,
+                onBack: { engine.walkthroughBack() },
+                onNext: { engine.walkthroughNext() },
+                onExit: { engine.exitWalkthrough(showDone: false) }
             )
-            .frame(maxWidth: 380, alignment: .trailing)
-            .position(x: bubbleX, y: bubbleY)
-            .allowsHitTesting(false)
+            .frame(maxWidth: 380)
+            .position(x: bubbleCenter.x, y: bubbleCenter.y)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
-            .animation(.easeOut(duration: 0.25), value: engine.bubbleText)
-            .animation(.easeOut(duration: 0.25), value: engine.state)
+            .animation(.easeOut(duration: 0.25), value: stepIndex)
+        } else {
+            let showsTranscript = engine.state == .listening && !engine.partialTranscript.isEmpty
+            let showsListeningHint = engine.state == .listening && engine.partialTranscript.isEmpty
+            let showsReply = !engine.bubbleText.isEmpty
+            if showsReply || showsTranscript || showsListeningHint {
+                ResponseBubbleView(
+                    text: showsReply ? engine.bubbleText : (showsTranscript ? engine.partialTranscript : "Listening…"),
+                    isSecondary: !showsReply
+                )
+                .frame(maxWidth: 380, alignment: .trailing)
+                .position(x: bubbleCenter.x, y: bubbleCenter.y)
+                .allowsHitTesting(false)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .animation(.easeOut(duration: 0.25), value: engine.bubbleText)
+                .animation(.easeOut(duration: 0.25), value: engine.state)
+            }
         }
     }
 }
@@ -157,6 +172,7 @@ struct OrbView: View {
         case .listening: return 1.08
         case .thinking: return 1.0
         case .responding, .speaking: return 1.05
+        case .walkthrough: return 1.02
         }
     }
 
@@ -166,6 +182,7 @@ struct OrbView: View {
         case .listening: return Color(red: 0.3, green: 0.85, blue: 0.5)
         case .thinking: return Color(red: 0.95, green: 0.75, blue: 0.3)
         case .responding, .speaking: return Color(red: 0.4, green: 0.6, blue: 0.98)
+        case .walkthrough: return Color(red: 0.55, green: 0.5, blue: 1.0)
         }
     }
 }
@@ -220,6 +237,99 @@ struct ResponseBubbleView: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.35), radius: 14, y: 4)
+    }
+}
+
+// MARK: - Walkthrough step chip
+
+/// The guided-walkthrough card: step counter, instruction, and Back/Next/✕
+/// controls. Unlike the bubble this is interactive — the overlay controller
+/// widens its mouse-accepting region to cover it while a walkthrough runs.
+struct StepChipView: View {
+    let stepIndex: Int
+    let total: Int
+    let instruction: String
+    let onBack: () -> Void
+    let onNext: () -> Void
+    let onExit: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("STEP \(stepIndex) OF \(total)")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.62, green: 0.56, blue: 1.0))
+                Spacer()
+                Button(action: onExit) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 20, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointerOnHover()
+            }
+
+            Text(instruction)
+                .font(.system(size: 13.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.94))
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                if stepIndex > 1 {
+                    chipButton("Back", systemImage: "chevron.left", prominent: false, action: onBack)
+                }
+                Spacer()
+                chipButton(
+                    stepIndex == total ? "Done" : "Next",
+                    systemImage: stepIndex == total ? "checkmark" : "chevron.right",
+                    prominent: true,
+                    action: onNext
+                )
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.black.opacity(0.78))
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(Color(red: 0.5, green: 0.44, blue: 1.0).opacity(0.45), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.35), radius: 14, y: 4)
+    }
+
+    private func chipButton(
+        _ title: String,
+        systemImage: String,
+        prominent: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                if !prominent {
+                    Image(systemName: systemImage).font(.system(size: 9, weight: .semibold))
+                }
+                Text(title).font(.system(size: 11.5, weight: .semibold))
+                if prominent {
+                    Image(systemName: systemImage).font(.system(size: 9, weight: .semibold))
+                }
+            }
+            .foregroundStyle(prominent ? Color.white : Color.white.opacity(0.7))
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(prominent ? Color(red: 0.5, green: 0.44, blue: 1.0) : Color.white.opacity(0.1))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointerOnHover()
     }
 }
 

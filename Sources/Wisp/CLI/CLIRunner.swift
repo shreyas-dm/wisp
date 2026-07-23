@@ -15,7 +15,7 @@ enum CLIRunner {
 
         switch command {
         case "version", "--version", "-v":
-            print("wisp 0.2.0")
+            print("wisp 0.3.0")
             return 0
         case "snapshot":
             return await runSnapshot(rest)
@@ -27,6 +27,10 @@ enum CLIRunner {
             return runKey(rest)
         case "memory":
             return runMemory(rest)
+        case "eval":
+            return await runEval(rest)
+        case "instructions":
+            return runInstructions(rest)
         case "help", "--help", "-h":
             printUsage()
             return 0
@@ -46,12 +50,16 @@ enum CLIRunner {
               wisp                     launch the menu bar app
               wisp snapshot [--budget N] [--delta] [--json]
                                        print the semantic snapshot of the frontmost app
-              wisp ask "question" [--voice] [--profile ID]
+              wisp ask "question" [--voice] [--profile ID] [--timing]
                                        one-shot question with screen context
               wisp doctor              check permissions, config, and connectivity
               wisp key set|list|delete [REF]
                                        manage API keys (stored in the Keychain)
-              wisp memory list|clear   inspect or reset what Wisp remembers
+              wisp memory list|search|clear
+                                       inspect, search, or reset what Wisp remembers
+              wisp eval [--profile ID] benchmark a model on screen tasks
+              wisp instructions [set "…"|clear]
+                                       standing preferences injected every turn
               wisp version             print the version
             """
         )
@@ -148,6 +156,7 @@ enum CLIRunner {
 
     private static func runAsk(_ arguments: [String]) async -> Int32 {
         var wantsVoice = false
+        var wantsTiming = false
         var profileOverride: String?
         var questionParts: [String] = []
         var index = 0
@@ -155,6 +164,8 @@ enum CLIRunner {
             switch arguments[index] {
             case "--voice":
                 wantsVoice = true
+            case "--timing":
+                wantsTiming = true
             case "--profile":
                 if index + 1 < arguments.count {
                     profileOverride = arguments[index + 1]
@@ -167,7 +178,7 @@ enum CLIRunner {
         }
         let question = questionParts.joined(separator: " ")
         guard !question.isEmpty else {
-            fputs("wisp: usage: wisp ask \"question\" [--voice] [--profile ID]\n", stderr)
+            fputs("wisp: usage: wisp ask \"question\" [--voice] [--profile ID] [--timing]\n", stderr)
             return 64
         }
 
@@ -193,9 +204,12 @@ enum CLIRunner {
         let secrets = SecretsStore()
         let memory = MemoryStore()
 
+        var metrics = TurnMetrics(profileID: profile.id)
+
         // Screen context (best effort — CLI works without it).
         var snapshotBlock: String?
         var snapshot: ScreenSnapshot?
+        let captureStartedAt = Date()
         if AXTreeCapture.isAccessibilityTrusted() {
             let capture = AXTreeCapture()
             if let captured = try? capture.captureSnapshot() {
@@ -203,6 +217,7 @@ enum CLIRunner {
                 snapshotBlock = SnapshotSerializer(tokenBudget: config.snapshotTokenBudget).serialize(captured)
             }
         }
+        metrics.captureMs = Date().timeIntervalSince(captureStartedAt) * 1000
 
         // Screenshot per screen-context mode, same policy as the app.
         var images: [AttachedImage] = []
@@ -247,37 +262,113 @@ enum CLIRunner {
             }
         }
 
-        let request = PromptBuilder(config: effectiveConfig).buildRequest(
-            transcript: question,
-            snapshotBlock: contextMode == .screenshot ? nil : snapshotBlock,
-            history: [],
-            memoryProfile: memory.profile(tokenBudget: config.memoryTokenBudget),
-            supportsVision: profile.supportsVision,
-            images: images
-        )
-
         let provider = ProviderFactory.makeProvider(profile: profile, keyResolver: secrets)
-        var tagParser = ResponseTagParser()
         var sentenceChunker = SentenceChunker()
         let speaker: TextToSpeechEngine? = wantsVoice
             ? VoiceEngineFactory.makeTextToSpeech(config: config, secrets: secrets)
             : nil
 
-        do {
+        func makeRequest(_ transcript: String) -> LLMChatRequest {
+            PromptBuilder(config: effectiveConfig).buildRequest(
+                transcript: transcript,
+                snapshotBlock: contextMode == .screenshot ? nil : snapshotBlock,
+                history: [],
+                memoryProfile: memory.profile(tokenBudget: config.memoryTokenBudget),
+                supportsVision: profile.supportsVision,
+                images: images
+            )
+        }
+
+        /// One streaming pass. Returns collected steps and (when allowed) a
+        /// pending recall query.
+        func streamOnce(_ request: LLMChatRequest, allowRecall: Bool) async throws
+            -> (steps: [WalkthroughStep], recallQuery: String?)
+        {
+            var tagParser = ResponseTagParser()
+            var stepPlan = StepPlanBuilder()
+            var recallQuery: String?
+            var sawFirstToken = false
+            let sentAt = Date()
+
+            func render(_ chunk: ResponseChunk) {
+                switch chunk {
+                case .text(let text):
+                    print(text, terminator: "")
+                    fflush(stdout)
+                    if let speaker {
+                        for sentence in sentenceChunker.consume(text) {
+                            speaker.enqueue(sentence)
+                        }
+                    }
+                case .tag(.point(let elementID)):
+                    let label = snapshot?.elements.first { $0.id == elementID }?.title
+                    print(label.map { " [→ \(elementID) \"\($0)\"]" } ?? " [→ \(elementID)]", terminator: "")
+                    fflush(stdout)
+                case .tag(.pointCoordinate(let x, let y, let displayIndex)):
+                    print(" [→ \(Int(x)),\(Int(y)) on display \(displayIndex + 1)]", terminator: "")
+                    fflush(stdout)
+                case .tag(.remember(let fact)):
+                    try? memory.appendFact(fact, source: "model")
+                    print(" [remembered]", terminator: "")
+                    fflush(stdout)
+                case .tag(.screenshotRequest):
+                    print(" [screenshot requested — skipped in CLI]", terminator: "")
+                    fflush(stdout)
+                case .tag(.step(let elementID, let instruction)):
+                    // Collected silently; the plan prints as a list below.
+                    stepPlan.addStep(elementID: elementID, instruction: instruction)
+                case .tag(.recall(let query)):
+                    if allowRecall, recallQuery == nil {
+                        recallQuery = query
+                    }
+                }
+            }
+
             for try await event in provider.streamChat(request) {
                 switch event {
                 case .textDelta(let delta):
-                    for chunk in tagParser.consume(delta) {
-                        renderChunk(chunk, memory: memory, snapshot: snapshot, speaker: speaker, chunker: &sentenceChunker)
+                    if !sawFirstToken {
+                        sawFirstToken = true
+                        metrics.firstTokenMs = Date().timeIntervalSince(sentAt) * 1000
                     }
-                case .done:
-                    break
+                    for chunk in tagParser.consume(delta) { render(chunk) }
+                case .done(let usage):
+                    metrics.streamMs = Date().timeIntervalSince(sentAt) * 1000
+                    metrics.inputTokens = usage?.inputTokens
+                    metrics.outputTokens = usage?.outputTokens
                 }
             }
-            for chunk in tagParser.finish() {
-                renderChunk(chunk, memory: memory, snapshot: snapshot, speaker: speaker, chunker: &sentenceChunker)
+            for chunk in tagParser.finish() { render(chunk) }
+            return (stepPlan.steps, recallQuery)
+        }
+
+        do {
+            var outcome = try await streamOnce(makeRequest(question), allowRecall: true)
+
+            // Recall loop: search local memory, re-ask once with results.
+            if let recallQuery = outcome.recallQuery {
+                print("\n  [recalling: \(recallQuery)]")
+                let hits = MemorySearch(store: memory).search(query: recallQuery)
+                let recalledBlock = MemorySearch.renderHits(hits, query: recallQuery)
+                let retryTranscript = "[Recalled context]\n\(recalledBlock)\n\n\(question)"
+                outcome = try await streamOnce(makeRequest(retryTranscript), allowRecall: false)
             }
+
+            // A step plan renders as a numbered list after the overview.
+            if !outcome.steps.isEmpty {
+                print("\n")
+                for step in outcome.steps {
+                    let label = snapshot?.elements.first { $0.id == step.elementID }?.title
+                    let target = label.map { "\(step.elementID) \"\($0)\"" } ?? step.elementID
+                    print("  \(step.index). \(step.instruction)  [→ \(target)]")
+                }
+            }
+
             print("")
+            metrics.snapshotTokens = snapshotBlock.map { TokenEstimator.estimate($0) }
+            if wantsTiming {
+                print("⏱  \(metrics.summaryLine)")
+            }
             if let speaker {
                 for sentence in sentenceChunker.finish() {
                     speaker.enqueue(sentence)
@@ -294,49 +385,6 @@ enum CLIRunner {
         } catch {
             fputs("wisp: \(error.localizedDescription)\n", stderr)
             return 1
-        }
-    }
-
-    private static func renderChunk(
-        _ chunk: ResponseChunk,
-        memory: MemoryStore,
-        snapshot: ScreenSnapshot?,
-        speaker: TextToSpeechEngine?,
-        chunker: inout SentenceChunker
-    ) {
-        switch chunk {
-        case .text(let text):
-            print(text, terminator: "")
-            fflush(stdout)
-            if let speaker {
-                for sentence in chunker.consume(text) {
-                    speaker.enqueue(sentence)
-                }
-            }
-        case .tag(.point(let elementID)):
-            let label = snapshot?.elements.first { $0.id == elementID }?.title
-            if let label {
-                print(" [→ \(elementID) \"\(label)\"]", terminator: "")
-            } else {
-                print(" [→ \(elementID)]", terminator: "")
-            }
-            fflush(stdout)
-        case .tag(.pointCoordinate(let x, let y, let displayIndex)):
-            print(" [→ \(Int(x)),\(Int(y)) on display \(displayIndex + 1)]", terminator: "")
-            fflush(stdout)
-        case .tag(.remember(let fact)):
-            try? memory.appendFact(fact, source: "model")
-            print(" [remembered]", terminator: "")
-            fflush(stdout)
-        case .tag(.screenshotRequest):
-            print(" [screenshot requested — skipped in CLI]", terminator: "")
-            fflush(stdout)
-        case .tag(.step(let elementID, let instruction)):
-            print("\n  step → \(elementID): \(instruction)", terminator: "")
-            fflush(stdout)
-        case .tag(.recall(let query)):
-            print(" [recall: \(query) — handled in-app]", terminator: "")
-            fflush(stdout)
         }
     }
 
@@ -452,6 +500,16 @@ enum CLIRunner {
             }
             return 0
 
+        case "search":
+            let query = arguments.dropFirst().joined(separator: " ")
+            guard !query.isEmpty else {
+                fputs("wisp: usage: wisp memory search \"query\"\n", stderr)
+                return 64
+            }
+            let hits = MemorySearch(store: memory).search(query: query, limit: 10)
+            print(MemorySearch.renderHits(hits, query: query))
+            return 0
+
         case "clear":
             print("Delete all \(memory.allFacts().count) remembered facts? [y/N] ", terminator: "")
             let answer = readLine(strippingNewline: true)?.lowercased()
@@ -466,7 +524,91 @@ enum CLIRunner {
             return 0
 
         default:
-            fputs("wisp: usage: wisp memory list|clear\n", stderr)
+            fputs("wisp: usage: wisp memory list|search|clear\n", stderr)
+            return 64
+        }
+    }
+
+    // MARK: - eval
+
+    /// Benchmarks a model on the built-in screen-task suite: pointing
+    /// accuracy, hallucinated element IDs, comprehension, latency.
+    private static func runEval(_ arguments: [String]) async -> Int32 {
+        let config = WispConfigStore().load()
+        var profileID = config.activeProfileID
+        if let flagIndex = arguments.firstIndex(of: "--profile"), flagIndex + 1 < arguments.count {
+            profileID = arguments[flagIndex + 1]
+        }
+        guard let profile = config.profiles.first(where: { $0.id == profileID }) else {
+            let available = config.profiles.map(\.id).joined(separator: ", ")
+            fputs("wisp: profile '\(profileID)' not found — available: \(available)\n", stderr)
+            return 1
+        }
+
+        let tasks = EvalRunner.builtInTasks()
+        guard !tasks.isEmpty else {
+            print("No eval tasks available.")
+            return 0
+        }
+        fputs("Running \(tasks.count) tasks against \(profile.displayName)…\n", stderr)
+        let provider = ProviderFactory.makeProvider(profile: profile, keyResolver: SecretsStore())
+        let report = await EvalRunner().run(
+            tasks: tasks,
+            provider: provider,
+            config: config,
+            progress: { line in
+                fputs("  \(line)\n", stderr)
+            }
+        )
+        print(report.render())
+        return 0
+    }
+
+    // MARK: - instructions
+
+    private static func runInstructions(_ arguments: [String]) -> Int32 {
+        let configStore = WispConfigStore()
+        var config = configStore.load()
+
+        switch arguments.first {
+        case nil:
+            if let instructions = config.customInstructions, !instructions.isEmpty {
+                print(instructions)
+            } else {
+                print("No standing instructions set. Add some with: wisp instructions set \"…\"")
+            }
+            return 0
+
+        case "set":
+            let text = arguments.dropFirst().joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                fputs("wisp: usage: wisp instructions set \"answer briefly, assume I use Vim\"\n", stderr)
+                return 64
+            }
+            config.customInstructions = text
+            do {
+                try configStore.save(config)
+                print("Saved. Wisp follows these in every conversation.")
+                return 0
+            } catch {
+                fputs("wisp: failed to save config: \(error)\n", stderr)
+                return 1
+            }
+
+        case "clear":
+            config.customInstructions = nil
+            do {
+                try configStore.save(config)
+                print("Cleared.")
+                return 0
+            } catch {
+                fputs("wisp: failed to save config: \(error)\n", stderr)
+                return 1
+            }
+
+        default:
+            fputs("wisp: usage: wisp instructions [set \"…\"|clear]\n", stderr)
             return 64
         }
     }

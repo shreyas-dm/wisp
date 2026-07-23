@@ -9,6 +9,8 @@ enum EngineState: Equatable {
     case thinking
     case responding
     case speaking
+    /// Guided walkthrough in progress (1-based step index).
+    case walkthrough(stepIndex: Int, total: Int)
 }
 
 /// Central state machine: owns the push-to-talk pipeline from hotkey press
@@ -29,12 +31,25 @@ final class CompanionEngine: ObservableObject {
     /// "New conversation" affordance.
     @Published private(set) var conversationTurnCount = 0
     @Published private(set) var activeProfileID: String
+    /// Instruction of the walkthrough step currently presented, for the
+    /// step chip.
+    @Published private(set) var currentWalkthroughStep: WalkthroughStep?
+    /// Last turn's latency breakdown, for the menu panel.
+    @Published private(set) var lastTurnSummary: String?
     @Published var voiceRepliesEnabled: Bool {
         didSet { persistConfigChanges() }
     }
     @Published var orbAlwaysVisible: Bool {
         didSet { persistConfigChanges() }
     }
+    @Published var activityLogEnabled: Bool {
+        didSet {
+            persistConfigChanges()
+            onActivityLogToggled?(activityLogEnabled)
+        }
+    }
+    /// AppDelegate hook: starts/stops the activity tracker on toggle.
+    var onActivityLogToggled: ((Bool) -> Void)?
 
     // MARK: - Collaborators
 
@@ -67,6 +82,28 @@ final class CompanionEngine: ObservableObject {
     /// warmup throttle and connection pool actually help.
     private var cachedProvider: (profileID: String, provider: LLMProvider)?
 
+    // MARK: - Walkthrough state
+
+    /// Steps collected from the current stream.
+    private var streamingStepPlan = StepPlanBuilder()
+    /// The active plan and the snapshot it was planned against (element
+    /// re-resolution matches role+title from this snapshot).
+    private var walkthroughPlan: [WalkthroughStep] = []
+    private var walkthroughPlanTargets: [Int: (role: ElementRole, title: String?)] = [:]
+    /// Snapshot at the moment the current step was presented — the
+    /// "previous" side of the completion heuristic.
+    private var walkthroughBaseline: ScreenSnapshot?
+    private var walkthroughPollTask: Task<Void, Never>?
+
+    // MARK: - Recall & metrics state
+
+    /// Set when the model emits [[recall:…]]; consumed once per question.
+    private var pendingRecallQuery: String?
+    private let metricsLog = MetricsLog()
+    private var metrics: TurnMetrics?
+    private var lastCaptureMs: Double?
+    private var speechStartedMidStream = false
+
     var profiles: [LLMModelProfile] { config.profiles }
 
     var activeProfile: LLMModelProfile? { config.activeProfile }
@@ -90,6 +127,7 @@ final class CompanionEngine: ObservableObject {
         self.activeProfileID = config.activeProfileID
         self.voiceRepliesEnabled = config.voiceRepliesEnabled
         self.orbAlwaysVisible = config.orbAlwaysVisible
+        self.activityLogEnabled = config.activityLogEnabled
 
         attachTextToSpeechCallback()
     }
@@ -139,6 +177,8 @@ final class CompanionEngine: ObservableObject {
     // MARK: - Hotkey entry points
 
     func hotkeyPressed() {
+        // A fresh push-to-talk during a walkthrough abandons it first.
+        if case .walkthrough = state { exitWalkthrough(showDone: false) }
         guard state == .idle else { return }
         refreshVoiceEnginesIfNeeded()
         warmupActiveProvider()
@@ -147,8 +187,10 @@ final class CompanionEngine: ObservableObject {
         partialTranscript = ""
         bubbleText = ""
         overlay?.interactionStarted()
+        metrics = TurnMetrics(profileID: config.activeProfileID)
 
         captureSnapshotForTurn()
+        metrics?.captureMs = lastCaptureMs
 
         speechToText.onPartialTranscript = { [weak self] transcript in
             Task { @MainActor in self?.partialTranscript = transcript }
@@ -169,32 +211,41 @@ final class CompanionEngine: ObservableObject {
         guard state == .listening else { return }
         currentTurnTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            let sttStartedAt = Date()
             let transcript = await self.speechToText.stopListening()
+            self.metrics?.sttMs = Date().timeIntervalSince(sttStartedAt) * 1000
             self.audioLevel = 0
             guard !transcript.isEmpty else {
                 self.presentTransientMessage("I didn't catch that.")
                 return
             }
             self.partialTranscript = transcript
-            await self.runTurn(transcript: transcript, images: [], isScreenshotRetry: false)
+            await self.runTurn(transcript: transcript, images: [])
         }
     }
 
     /// Text-driven entry point (menu panel, future integrations).
     func ask(_ text: String) {
+        if case .walkthrough = state { exitWalkthrough(showDone: false) }
         guard state == .idle, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         refreshVoiceEnginesIfNeeded()
         warmupActiveProvider()
         cancelBubbleFade()
         bubbleText = ""
         overlay?.interactionStarted()
+        metrics = TurnMetrics(profileID: config.activeProfileID)
         captureSnapshotForTurn()
+        metrics?.captureMs = lastCaptureMs
         currentTurnTask = Task { @MainActor [weak self] in
-            await self?.runTurn(transcript: text, images: [], isScreenshotRetry: false)
+            await self?.runTurn(transcript: text, images: [])
         }
     }
 
     func cancelInteraction() {
+        if case .walkthrough = state {
+            exitWalkthrough(showDone: false)
+            return
+        }
         currentTurnTask?.cancel()
         currentTurnTask = nil
         speechToText.cancelListening()
@@ -238,6 +289,8 @@ final class CompanionEngine: ObservableObject {
     // MARK: - Turn pipeline
 
     private func captureSnapshotForTurn() {
+        let captureStartedAt = Date()
+        defer { lastCaptureMs = Date().timeIntervalSince(captureStartedAt) * 1000 }
         guard AXTreeCapture.isAccessibilityTrusted() else {
             snapshotBlockForTurn = nil
             currentSnapshot = nil
@@ -261,7 +314,12 @@ final class CompanionEngine: ObservableObject {
         }
     }
 
-    private func runTurn(transcript: String, images: [AttachedImage], isScreenshotRetry: Bool) async {
+    private func runTurn(
+        transcript: String,
+        images: [AttachedImage],
+        isScreenshotRetry: Bool = false,
+        isRecallRetry: Bool = false
+    ) async {
         guard let profile = config.activeProfile else {
             presentTransientMessage("No model profile selected — pick one in the menu bar panel.")
             return
@@ -270,6 +328,9 @@ final class CompanionEngine: ObservableObject {
         state = .thinking
         let provider = provider(for: profile)
         let promptBuilder = PromptBuilder(config: config)
+        streamingStepPlan = StepPlanBuilder()
+        if !isRecallRetry { pendingRecallQuery = nil }
+        speechStartedMidStream = false
 
         // Screen context per the configured mode: hybrid (default) sends the
         // structured snapshot AND a downscaled screenshot every turn for
@@ -320,6 +381,8 @@ final class CompanionEngine: ObservableObject {
                     maxDimension: config.screenshotMaxDimension
                 ))?.jpegData
             }
+            let ocrStartedAt = Date()
+            defer { metrics?.ocrMs = Date().timeIntervalSince(ocrStartedAt) * 1000 }
             if let jpegForOCR,
                snapshot.displays.indices.contains(displayIndex),
                var ocrElements = try? await OCRCapture().recognizeText(
@@ -354,12 +417,18 @@ final class CompanionEngine: ObservableObject {
         var displayedText = ""
         var wantsScreenshot = false
         var reportedUsage: LLMUsage?
+        let requestSentAt = Date()
+        var firstTokenAt: Date?
 
         do {
             for try await event in provider.streamChat(request) {
                 if Task.isCancelled { return }
                 switch event {
                 case .textDelta(let delta):
+                    if firstTokenAt == nil {
+                        firstTokenAt = Date()
+                        metrics?.firstTokenMs = firstTokenAt!.timeIntervalSince(requestSentAt) * 1000
+                    }
                     for chunk in tagParser.consume(delta) {
                         handleChunk(
                             chunk,
@@ -370,6 +439,7 @@ final class CompanionEngine: ObservableObject {
                     }
                 case .done(let usage):
                     reportedUsage = usage
+                    metrics?.streamMs = Date().timeIntervalSince(requestSentAt) * 1000
                 }
             }
         } catch {
@@ -398,6 +468,26 @@ final class CompanionEngine: ObservableObject {
                 + request.messages.reduce(0) { $0 + TokenEstimator.estimate($1.text) }
             sessionOutputTokens += TokenEstimator.estimate(displayedText)
         }
+        metrics?.inputTokens = reportedUsage?.inputTokens
+        metrics?.outputTokens = reportedUsage?.outputTokens
+        metrics?.snapshotTokens = snapshotBlockForTurn.map { TokenEstimator.estimate($0) }
+
+        // Recall: the model asked to search local memory. Search, then
+        // re-send the same question once with what was found.
+        if let recallQuery = pendingRecallQuery, !isRecallRetry {
+            pendingRecallQuery = nil
+            bubbleText = "remembering…"
+            textToSpeech.stop()
+            let hits = MemorySearch(store: memory).search(query: recallQuery)
+            let recalledBlock = MemorySearch.renderHits(hits, query: recallQuery)
+            await runTurn(
+                transcript: "[Recalled context]\n\(recalledBlock)\n\n\(transcript)",
+                images: turnImages,
+                isScreenshotRetry: isScreenshotRetry,
+                isRecallRetry: true
+            )
+            return
+        }
 
         // Screenshot fallback: the model asked to see pixels and this turn
         // didn't already include them. Re-send the same transcript once.
@@ -417,27 +507,46 @@ final class CompanionEngine: ObservableObject {
             }
         }
 
+        let plannedSteps = streamingStepPlan.steps
         let trimmedReply = displayedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedReply.isEmpty {
+        if !trimmedReply.isEmpty || !plannedSteps.isEmpty {
+            // Steps go into history in tag form so follow-up questions see
+            // the plan the model committed to.
+            let historyReply = trimmedReply
+                + plannedSteps.map { "\n[[step:\($0.elementID):\($0.instruction)]]" }.joined()
             history.append(request.messages.last ?? ChatMessage(role: .user, text: transcript))
-            history.append(ChatMessage(role: .assistant, text: trimmedReply))
+            history.append(ChatMessage(role: .assistant, text: historyReply))
             history = PromptBuilder.compactHistory(history, turnLimit: config.historyTurnLimit)
             conversationTurnCount = history.count / 2
         }
 
         if voiceRepliesEnabled {
+            let speechStartAt = Date()
             for sentence in sentenceChunker.finish() {
                 textToSpeech.enqueue(sentence)
             }
             textToSpeech.finishReply()
-            if textToSpeech.isSpeaking {
-                state = .speaking
-            } else {
-                finishInteraction()
-            }
+            metrics?.ttsStartMs = speechStartedMidStream ? 0 : Date().timeIntervalSince(speechStartAt) * 1000
+        }
+        finalizeMetrics()
+
+        if !plannedSteps.isEmpty {
+            startWalkthrough(plannedSteps)
+            return
+        }
+
+        if voiceRepliesEnabled, textToSpeech.isSpeaking {
+            state = .speaking
         } else {
             finishInteraction()
         }
+    }
+
+    private func finalizeMetrics() {
+        guard let finished = metrics else { return }
+        metricsLog.append(finished)
+        lastTurnSummary = finished.summaryLine
+        metrics = nil
     }
 
     private func handleChunk(
@@ -454,6 +563,7 @@ final class CompanionEngine: ObservableObject {
             if voiceRepliesEnabled {
                 for sentence in sentenceChunker.consume(text) {
                     textToSpeech.enqueue(sentence)
+                    speechStartedMidStream = true
                 }
             }
         case .tag(.point(let elementID)):
@@ -464,9 +574,146 @@ final class CompanionEngine: ObservableObject {
             try? memory.appendFact(fact, source: "model")
         case .tag(.screenshotRequest):
             wantsScreenshot = true
-        case .tag(.step), .tag(.recall):
-            // Walkthrough and recall handling land with the v0.3 features.
-            break
+        case .tag(.step(let elementID, let instruction)):
+            // Steps are collected silently and presented one at a time
+            // after the stream ends — not spoken as they arrive.
+            streamingStepPlan.addStep(elementID: elementID, instruction: instruction)
+        case .tag(.recall(let query)):
+            if pendingRecallQuery == nil {
+                pendingRecallQuery = query
+            }
+        }
+    }
+
+    // MARK: - Guided walkthrough
+
+    private func startWalkthrough(_ steps: [WalkthroughStep]) {
+        walkthroughPlan = steps
+        // Remember each target's identity from the planning snapshot so a
+        // step can be re-found after the screen changes and IDs shift.
+        walkthroughPlanTargets = [:]
+        if let snapshot = currentSnapshot {
+            for step in steps {
+                if let element = snapshot.elements.first(where: { $0.id == step.elementID }) {
+                    walkthroughPlanTargets[step.index] = (element.role, element.title)
+                }
+            }
+        }
+        presentWalkthroughStep(index: 1)
+        startWalkthroughPolling()
+    }
+
+    func walkthroughNext() {
+        guard case .walkthrough(let stepIndex, let total) = state else { return }
+        if stepIndex >= total {
+            exitWalkthrough(showDone: true)
+        } else {
+            presentWalkthroughStep(index: stepIndex + 1)
+        }
+    }
+
+    func walkthroughBack() {
+        guard case .walkthrough(let stepIndex, _) = state, stepIndex > 1 else { return }
+        presentWalkthroughStep(index: stepIndex - 1)
+    }
+
+    func exitWalkthrough(showDone: Bool) {
+        walkthroughPollTask?.cancel()
+        walkthroughPollTask = nil
+        walkthroughPlan = []
+        walkthroughPlanTargets = [:]
+        walkthroughBaseline = nil
+        currentWalkthroughStep = nil
+        textToSpeech.stop()
+        if showDone {
+            presentTransientMessage("Done ✓")
+        } else {
+            state = .idle
+            overlay?.interactionEnded()
+            scheduleBubbleFade()
+        }
+    }
+
+    private func presentWalkthroughStep(index: Int) {
+        guard let step = walkthroughPlan.first(where: { $0.index == index }) else {
+            exitWalkthrough(showDone: true)
+            return
+        }
+        state = .walkthrough(stepIndex: index, total: walkthroughPlan.count)
+        currentWalkthroughStep = step
+        bubbleText = ""
+        // Re-snapshot so both pointing and the completion baseline reflect
+        // the screen as the step begins.
+        if AXTreeCapture.isAccessibilityTrusted(), let fresh = try? axCapture.captureSnapshot() {
+            currentSnapshot = fresh
+            previousSnapshot = fresh
+        }
+        walkthroughBaseline = currentSnapshot
+
+        if let element = resolveWalkthroughTarget(step: step, in: currentSnapshot) {
+            let display = currentSnapshot?.displays.indices.contains(element.displayIndex) == true
+                ? currentSnapshot!.displays[element.displayIndex]
+                : currentSnapshot?.displays.first
+            if let display {
+                overlay?.point(atQuartzFrame: element.frame, on: display, label: element.title)
+            }
+        }
+
+        if voiceRepliesEnabled {
+            textToSpeech.enqueue("Step \(index). \(step.instruction)")
+            textToSpeech.finishReply()
+        }
+    }
+
+    /// Finds the step's target in a snapshot: by ID when it still resolves,
+    /// otherwise by the role+title recorded at planning time (IDs shift as
+    /// the screen changes).
+    private func resolveWalkthroughTarget(step: WalkthroughStep, in snapshot: ScreenSnapshot?) -> SnapshotElement? {
+        guard let snapshot else { return nil }
+        if let byID = snapshot.elements.first(where: { $0.id == step.elementID }) {
+            if let original = walkthroughPlanTargets[step.index] {
+                if byID.role == original.role && byID.title == original.title {
+                    return byID
+                }
+            } else {
+                return byID
+            }
+        }
+        if let original = walkthroughPlanTargets[step.index] {
+            return snapshot.elements.first {
+                $0.role == original.role && $0.title == original.title
+            }
+        }
+        return nil
+    }
+
+    /// Watches the screen while a walkthrough is active and advances when
+    /// the current step looks completed.
+    private func startWalkthroughPolling() {
+        walkthroughPollTask?.cancel()
+        guard AXTreeCapture.isAccessibilityTrusted() else { return }
+        walkthroughPollTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                guard !Task.isCancelled, let self else { return }
+                guard case .walkthrough = self.state,
+                      let step = self.currentWalkthroughStep,
+                      let baseline = self.walkthroughBaseline,
+                      let fresh = try? self.axCapture.captureSnapshot()
+                else { continue }
+                if StepPlanBuilder.looksCompleted(step: step, previous: baseline, current: fresh) {
+                    self.currentSnapshot = fresh
+                    self.previousSnapshot = fresh
+                    self.walkthroughNext()
+                } else {
+                    // Keep the baseline fresh enough that slow drifts (live
+                    // content, clocks) don't accumulate into a false advance,
+                    // but never replace it mid-gesture: only adopt the fresh
+                    // snapshot as baseline when nothing about the step's
+                    // target changed.
+                    self.walkthroughBaseline = baseline
+                }
+            }
         }
     }
 
@@ -558,6 +805,15 @@ final class CompanionEngine: ObservableObject {
     private func persistConfigChanges() {
         config.voiceRepliesEnabled = voiceRepliesEnabled
         config.orbAlwaysVisible = orbAlwaysVisible
+        config.activityLogEnabled = activityLogEnabled
+        try? configStore.save(config)
+    }
+
+    var customInstructions: String? { config.customInstructions }
+
+    func setCustomInstructions(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        config.customInstructions = (trimmed?.isEmpty ?? true) ? nil : trimmed
         try? configStore.save(config)
     }
 
