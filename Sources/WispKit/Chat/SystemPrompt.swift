@@ -14,7 +14,8 @@ public enum SystemPrompt {
     public static func build(
         memoryProfile: String?,
         supportsVision: Bool,
-        screenshotIncluded: Bool = false
+        screenshotIncluded: Bool = false,
+        customInstructions: String? = nil
     ) -> String {
         var sections: [String] = []
 
@@ -74,6 +75,33 @@ public enum SystemPrompt {
         }
         sections.append(pointingSection)
 
+        sections.append(
+            """
+            GUIDED WALKTHROUGHS
+            When the user asks how to do something that takes several actions, \
+            reply with one short overview sentence followed by 2–6 step tags, \
+            each on the path to the goal: [[step:ID:short imperative \
+            instruction]], e.g. [[step:e42:Open the File menu]]. Use element \
+            IDs from the snapshot; order matters. Wisp then walks the user \
+            through your steps one at a time with a pointer — do not also \
+            describe the steps in prose. For single-action answers keep using \
+            [[point:ID]] instead.
+            """
+        )
+
+        sections.append(
+            """
+            RECALL
+            You have local long-term memory beyond what is shown here: past \
+            conversations and, when enabled, which apps the user was using. If \
+            the user refers to something from the past that you cannot see \
+            ("that error from yesterday", "the site I showed you"), reply with \
+            only [[recall:search terms]] and nothing else. Wisp searches \
+            locally and re-sends the question with what it found. At most one \
+            recall per question; if results still don't help, say so honestly.
+            """
+        )
+
         if supportsVision && !screenshotIncluded {
             sections.append(
                 """
@@ -94,6 +122,16 @@ public enum SystemPrompt {
             worth keeping across sessions, not conversation details.
             """
         )
+
+        if let customInstructions, !customInstructions.isEmpty {
+            sections.append(
+                """
+                USER INSTRUCTIONS
+                Standing preferences from the user — follow them:
+                \(customInstructions)
+                """
+            )
+        }
 
         if let memoryProfile, !memoryProfile.isEmpty {
             sections.append(

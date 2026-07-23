@@ -11,6 +11,11 @@ public enum ResponseTag: Equatable, Sendable {
     case screenshotRequest
     /// `[[remember:fact]]` — durable fact for the memory store.
     case remember(fact: String)
+    /// `[[step:e12:Click Export]]` — one step of a guided walkthrough.
+    case step(elementID: String, instruction: String)
+    /// `[[recall:query]]` — the model wants Wisp to search its local
+    /// memory (facts, session history, activity log) and re-prompt.
+    case recall(query: String)
 }
 
 public enum ResponseChunk: Equatable, Sendable {
@@ -117,6 +122,18 @@ public struct ResponseTagParser: Sendable {
                 return .pointCoordinate(x: x, y: y, displayIndex: displayIndex)
             }
             return nil
+        }
+        if inner.hasPrefix("step:") {
+            let payload = String(inner.dropFirst("step:".count))
+            guard let separator = payload.firstIndex(of: ":") else { return nil }
+            let elementID = String(payload[..<separator]).trimmingCharacters(in: .whitespaces)
+            let instruction = String(payload[payload.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard elementID.range(of: "^[et]\\d+$", options: .regularExpression) != nil, !instruction.isEmpty else { return nil }
+            return .step(elementID: elementID, instruction: instruction)
+        }
+        if inner.hasPrefix("recall:") {
+            let query = String(inner.dropFirst("recall:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return query.isEmpty ? nil : .recall(query: query)
         }
         if inner.hasPrefix("remember:") {
             let fact = String(inner.dropFirst("remember:".count)).trimmingCharacters(in: .whitespacesAndNewlines)

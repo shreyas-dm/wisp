@@ -464,6 +464,9 @@ final class CompanionEngine: ObservableObject {
             try? memory.appendFact(fact, source: "model")
         case .tag(.screenshotRequest):
             wantsScreenshot = true
+        case .tag(.step), .tag(.recall):
+            // Walkthrough and recall handling land with the v0.3 features.
+            break
         }
     }
 

@@ -21,6 +21,9 @@ public enum VoiceEngineChoice: String, Codable, Sendable, CaseIterable {
     case auto
     case apple
     case elevenlabs
+    /// Any OpenAI-compatible /audio/transcriptions server (whisper.cpp,
+    /// Groq, LM Studio, OpenAI). STT only.
+    case whisper
 }
 
 /// User configuration, stored as JSON at `~/.wisp/config.json`.
@@ -47,6 +50,14 @@ public struct WispConfig: Codable, Sendable, Equatable {
     /// Run local OCR on the screenshot when the accessibility tree is
     /// sparse, so text-only models can read canvas/video content.
     public var ocrEnabled: Bool
+    /// Standing user preferences injected into every system prompt
+    /// ("answer in Hindi", "assume I use Vim"…).
+    public var customInstructions: String?
+    /// Keep the local app/window activity log that powers recall.
+    public var activityLogEnabled: Bool
+    /// Whisper-compatible STT endpoint (used when sttEngine == .whisper).
+    public var whisperBaseURL: String?
+    public var whisperModel: String
     /// Speech-to-text engine selection.
     public var sttEngine: VoiceEngineChoice
     /// Text-to-speech engine selection.
@@ -68,6 +79,10 @@ public struct WispConfig: Codable, Sendable, Equatable {
         memoryTokenBudget: Int = 500,
         historyTurnLimit: Int = 12,
         ocrEnabled: Bool = true,
+        customInstructions: String? = nil,
+        activityLogEnabled: Bool = true,
+        whisperBaseURL: String? = nil,
+        whisperModel: String = "whisper-1",
         sttEngine: VoiceEngineChoice = .auto,
         ttsEngine: VoiceEngineChoice = .auto,
         elevenLabsVoiceID: String = "21m00Tcm4TlvDq8ikWAM",
@@ -84,6 +99,10 @@ public struct WispConfig: Codable, Sendable, Equatable {
         self.memoryTokenBudget = memoryTokenBudget
         self.historyTurnLimit = historyTurnLimit
         self.ocrEnabled = ocrEnabled
+        self.customInstructions = customInstructions
+        self.activityLogEnabled = activityLogEnabled
+        self.whisperBaseURL = whisperBaseURL
+        self.whisperModel = whisperModel
         self.sttEngine = sttEngine
         self.ttsEngine = ttsEngine
         self.elevenLabsVoiceID = elevenLabsVoiceID
@@ -104,6 +123,10 @@ public struct WispConfig: Codable, Sendable, Equatable {
         memoryTokenBudget = try container.decodeIfPresent(Int.self, forKey: .memoryTokenBudget) ?? defaults.memoryTokenBudget
         historyTurnLimit = try container.decodeIfPresent(Int.self, forKey: .historyTurnLimit) ?? defaults.historyTurnLimit
         ocrEnabled = try container.decodeIfPresent(Bool.self, forKey: .ocrEnabled) ?? defaults.ocrEnabled
+        customInstructions = try container.decodeIfPresent(String.self, forKey: .customInstructions)
+        activityLogEnabled = try container.decodeIfPresent(Bool.self, forKey: .activityLogEnabled) ?? defaults.activityLogEnabled
+        whisperBaseURL = try container.decodeIfPresent(String.self, forKey: .whisperBaseURL)
+        whisperModel = try container.decodeIfPresent(String.self, forKey: .whisperModel) ?? defaults.whisperModel
         sttEngine = try container.decodeIfPresent(VoiceEngineChoice.self, forKey: .sttEngine) ?? defaults.sttEngine
         ttsEngine = try container.decodeIfPresent(VoiceEngineChoice.self, forKey: .ttsEngine) ?? defaults.ttsEngine
         elevenLabsVoiceID = try container.decodeIfPresent(String.self, forKey: .elevenLabsVoiceID) ?? defaults.elevenLabsVoiceID

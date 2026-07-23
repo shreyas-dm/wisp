@@ -36,7 +36,8 @@ public struct PromptBuilder: Sendable {
             systemPrompt: SystemPrompt.build(
                 memoryProfile: memoryProfile,
                 supportsVision: supportsVision,
-                screenshotIncluded: !images.isEmpty
+                screenshotIncluded: !images.isEmpty,
+                customInstructions: config.customInstructions
             ),
             messages: messages,
             maxOutputTokens: config.activeProfile?.maxOutputTokens ?? 1024,

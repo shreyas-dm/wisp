@@ -331,6 +331,12 @@ enum CLIRunner {
         case .tag(.screenshotRequest):
             print(" [screenshot requested — skipped in CLI]", terminator: "")
             fflush(stdout)
+        case .tag(.step(let elementID, let instruction)):
+            print("\n  step → \(elementID): \(instruction)", terminator: "")
+            fflush(stdout)
+        case .tag(.recall(let query)):
+            print(" [recall: \(query) — handled in-app]", terminator: "")
+            fflush(stdout)
         }
     }
 

@@ -12,6 +12,15 @@ public enum VoiceEngineFactory {
         switch config.sttEngine {
         case .apple:
             return AppleSpeechToText()
+        case .whisper:
+            if let base = config.whisperBaseURL, let url = URL(string: base) {
+                return WhisperSpeechToText(
+                    baseURL: url,
+                    model: config.whisperModel,
+                    apiKey: secrets.apiKey(for: "WHISPER_API_KEY")
+                )
+            }
+            return AppleSpeechToText()
         case .elevenlabs, .auto:
             if let key {
                 return ElevenLabsSpeechToText(apiKey: key, modelID: config.elevenLabsSTTModel)
@@ -23,7 +32,7 @@ public enum VoiceEngineFactory {
     public static func makeTextToSpeech(config: WispConfig, secrets: APIKeyResolving) -> TextToSpeechEngine {
         let key = secrets.apiKey(for: elevenLabsAPIKeyRef)
         switch config.ttsEngine {
-        case .apple:
+        case .apple, .whisper:
             return AppleTextToSpeech()
         case .elevenlabs, .auto:
             if let key {
@@ -43,6 +52,7 @@ public enum VoiceEngineFactory {
         func describe(_ choice: VoiceEngineChoice) -> String {
             switch choice {
             case .apple: return "Apple (local)"
+            case .whisper: return "Whisper endpoint"
             case .elevenlabs: return hasKey ? "ElevenLabs" : "ElevenLabs (no key — using Apple)"
             case .auto: return hasKey ? "ElevenLabs (auto)" : "Apple (auto — add ELEVENLABS_API_KEY to upgrade)"
             }
