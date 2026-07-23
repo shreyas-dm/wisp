@@ -6,7 +6,9 @@
 Wisp is a native macOS companion that lives next to your cursor: hold **⌃⌥**,
 ask a question out loud, and it answers in a small bubble and a calm voice —
 having actually looked at your screen — and can fly a pointer to the exact
-button, field, or link it's talking about.
+button, field, or link it's talking about. Ask *how* to do something and it
+walks you through, a step at a time, pointer on each step, advancing as it
+sees you complete them.
 
 It is built from scratch around three convictions: a screen assistant should
 understand **structure, not just pixels**; it should work with **any model
@@ -62,8 +64,8 @@ text into pointable elements.
 Because elements carry IDs, the model points by writing `[[point:e21]]` in
 plain text — no pixel-coordinate grounding, no vision requirement — so a
 text-only open model can guide you around your screen as reliably as a
-frontier one. The whole interaction protocol (pointing, screenshot requests,
-memory writes) is plain text.
+frontier one. The whole interaction protocol — pointing, guided walkthrough
+steps, screenshot requests, memory writes, recall — is plain text.
 
 Wisp speaks two wire protocols: the Anthropic Messages API and OpenAI-style
 chat completions, which covers OpenAI, Ollama, vLLM, LM Studio, OpenRouter,
@@ -76,8 +78,11 @@ Switching models is one click in the menu bar. See
 When Wisp learns something durable — your name, your stack, the project
 you're wrestling with — it records a fact in `~/.wisp/memory/`, plain
 Markdown you can read, edit, or delete. A token-budgeted digest is injected
-into every conversation, so Wisp gets more useful the more you use it.
-Everything stays on your machine. See [docs/memory.md](docs/memory.md).
+into every conversation, so Wisp gets more useful the more you use it. And
+when you mention something it can't see — *"that error from yesterday"* —
+Wisp searches its own past conversations and (optionally) a local log of
+your app activity, then answers with what it found. Everything stays on
+your machine. See [docs/memory.md](docs/memory.md).
 
 ## Quick start
 
@@ -122,6 +127,12 @@ the reply streams into the bubble while your configured voice reads it
 answer involves something on screen — *"click Send invoice in the form"* —
 a pointer glides to the element and rings it.
 
+Ask something bigger — *"how do I add a signature here?"* — and you get a
+walkthrough instead of a lecture: steps appear one at a time, the pointer
+glides to each control, and Wisp advances when it sees the step happen on
+screen (navigation, a value changing, focus arriving) or when you click
+Next.
+
 Prefer typing? **⌃⌥Space** opens a floating input. **Esc** cancels an
 in-flight answer anywhere. The orb drags anywhere and remembers its spot;
 the menu bar panel has the model picker, a Memory & History window (see and
@@ -155,7 +166,9 @@ Wisp doctor
   ✓ tts voice            Samantha
 ```
 
-The full command reference is in [docs/cli.md](docs/cli.md).
+The full command reference is in [docs/cli.md](docs/cli.md) — including
+`wisp ask --timing`, which appends a per-stage latency breakdown (capture,
+speech, first token, stream, voice) for tuning feel.
 
 ## Configuration
 
@@ -206,11 +219,28 @@ Beyond profiles, the interesting knobs (all optional, shown with defaults):
   "screenshotMaxDimension": 1024,     // longest side of the attached screenshot
   "snapshotTokenBudget": 1200,
   "ocrEnabled": true,                 // local OCR when the AX tree is sparse
-  "sttEngine": "auto",                // auto | elevenlabs | apple
+  "customInstructions": null,         // standing preferences, injected every turn
+  "activityLogEnabled": true,         // local app-usage log that powers recall
+  "sttEngine": "auto",                // auto | elevenlabs | whisper | apple
   "ttsEngine": "auto",
-  "elevenLabsVoiceID": "21m00Tcm4TlvDq8ikWAM"
+  "elevenLabsVoiceID": "21m00Tcm4TlvDq8ikWAM",
+  "whisperBaseURL": null              // any /audio/transcriptions server
 }
 ```
+
+### Measuring models
+
+Claims about which model "works fine" with Wisp should be measurable, not
+vibes. `wisp eval` runs a built-in suite of fixture screens — pointing,
+comprehension, and invented-element-ID checks — against any profile:
+
+```
+$ wisp eval --profile glm
+Running 10 tasks against GLM (Zhipu)…
+pointing 8/9 · comprehension 6/6 · invented IDs 0 · mean latency 1.4s
+```
+
+How the suite works and how to read it: [docs/eval.md](docs/eval.md).
 
 ## Privacy
 

@@ -48,10 +48,32 @@ The filled blue button at the bottom right, labeled "Send invoice".
 → points at e21 "Send invoice"
 ```
 
+Ask a how-do-I question and the reply arrives as a walkthrough — the same
+steps the app walks you through with the pointer render as a numbered list:
+
+```
+$ wisp ask "how do I turn on dark mode here?"
+Appearance lives in the View menu.
+  1. e12: Open the View menu
+  2. e31: Choose Appearance
+  3. e44: Select Dark
+```
+
 Options:
 
-- `--voice` — also speak the reply with the local TTS.
+- `--voice` — also speak the reply with the configured TTS.
 - `--profile ID` — use a specific model profile for this question.
+- `--timing` — append a per-stage latency breakdown after the reply:
+
+```
+$ wisp ask --timing "what's this dialog asking?"
+It wants permission to open the link in Slack — Open proceeds, Cancel stays.
+→ points at e7 "Open"
+capture 48ms · stt 610ms · first-token 890ms · stream 2100ms · tts 130ms
+```
+
+Timing lines are also appended to `~/.wisp/metrics.jsonl` (local only), so
+you can compare models and settings over time.
 
 ## `wisp doctor`
 
@@ -98,8 +120,53 @@ $ wisp memory list
 $ wisp memory clear     # asks for confirmation
 ```
 
+`wisp memory search` runs the same local search the `[[recall:…]]` tag uses
+— facts, session transcripts, and the activity log, scored with a recency
+boost:
+
+```
+$ wisp memory search "certificate error"
+  [session · 2026-07-22] on 2026-07-22: user: the build failed with a
+      certificate error / wisp: that signing certificate expired — renew…
+  [activity · 2026-07-22] on 2026-07-22: 16:10–16:40 Xcode — "wisp — signing" (30m)
+```
+
 Or just edit `~/.wisp/memory/facts.md` by hand — see
 [docs/memory.md](memory.md).
+
+## `wisp eval`
+
+Runs the built-in model-evaluation suite (fixture screens, ~10 tasks)
+against a profile and scores pointing accuracy, comprehension, invented
+element IDs, and latency. See [docs/eval.md](eval.md).
+
+```
+$ wisp eval --profile kimi
+Running 10 tasks against Kimi (Moonshot)…
+
+  task              point  comprehend  latency
+  browser-form      ✓      ✓           1.2s
+  mail-triage       ✓      ✓           0.9s
+  settings-toggle   ✓      –           1.1s
+  ocr-video         ✗      ✓           1.6s
+  …
+
+  pointing 8/9 · comprehension 6/6 · invented IDs 0 · mean latency 1.3s
+```
+
+Defaults to the active profile; needs that profile's API key (or a local
+server). The Demo profile works for a dry run of the harness itself.
+
+## `wisp instructions`
+
+Standing preferences injected into every conversation (stored as
+`customInstructions` in config):
+
+```
+$ wisp instructions set "Answer in short sentences. Assume I use Vim."
+$ wisp instructions           # prints the current instructions
+$ wisp instructions clear
+```
 
 ## `wisp version`
 

@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.0 — 2026-07-23
+
+It teaches, it remembers, it proves itself.
+
+- **Guided walkthroughs**: how-do-I questions come back as 2–6 step tags;
+  Wisp walks you through them one at a time — pointer on each step,
+  auto-advancing when the screen shows the step happened (navigation, a
+  value change, focus arriving), with manual Next as fallback. In the CLI,
+  steps render as a numbered list.
+- **Recall**: a `[[recall:…]]` tag lets the model search Wisp's local
+  memory — facts, session transcripts, and the activity log — and
+  re-answer with what it found. Also exposed as `wisp memory search`.
+- **Activity log** (optional, on by default, local-only): which app and
+  window had focus and for how long, one Markdown file per day; feeds
+  recall and distillation. `"activityLogEnabled": false` turns it off.
+- **`wisp eval`**: a built-in benchmark over fixture screens measuring
+  pointing accuracy, comprehension, invented element IDs, and latency for
+  any profile — the "works with open models" claim, made measurable.
+- **Turn metrics**: per-stage latency breakdown (capture, STT, first
+  token, stream, TTS) via `wisp ask --timing`, logged locally to
+  `~/.wisp/metrics.jsonl`.
+- **Whisper-compatible STT**: any `/audio/transcriptions` server
+  (whisper.cpp, Groq, LM Studio, OpenAI) via `"sttEngine": "whisper"`.
+- **Custom instructions**: standing preferences injected into every
+  conversation — `wisp instructions set "…"`.
+
 ## v0.2.0 — 2026-07-23
 
 Deeper context, faster feel.

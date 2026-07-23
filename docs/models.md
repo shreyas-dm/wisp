@@ -75,13 +75,40 @@ APIs and falls back to the local Apple engines so it always has a voice:
 | Engine | STT | TTS | Key ref | Notes |
 |---|---|---|---|---|
 | ElevenLabs | Scribe (`scribe_v1`) | `eleven_flash_v2_5` | `ELEVENLABS_API_KEY` | Preferred automatically when the key resolves (`"auto"`) |
+| Whisper endpoint | any `/audio/transcriptions` server | — | `WHISPER_API_KEY` (optional) | STT only; whisper.cpp, Groq, LM Studio, OpenAI |
 | Apple (local) | Speech framework | AVSpeech | — | Zero-key fallback, fully offline |
 
 ```bash
 wisp key set ELEVENLABS_API_KEY
 ```
 
-Set `"sttEngine"` / `"ttsEngine"` to `"elevenlabs"` or `"apple"` in
-`~/.wisp/config.json` to pin an engine instead of `"auto"`; pick a voice
-with `"elevenLabsVoiceID"`. The engine layer is a small protocol — new voice
-vendors are easy to add and A/B.
+Set `"sttEngine"` / `"ttsEngine"` to `"elevenlabs"`, `"whisper"` (STT
+only), or `"apple"` in `~/.wisp/config.json` to pin an engine instead of
+`"auto"`; pick a voice with `"elevenLabsVoiceID"`. The engine layer is a
+small protocol — new voice vendors are easy to add and A/B.
+
+### Whisper-compatible STT
+
+Any server speaking the OpenAI `/audio/transcriptions` protocol works —
+a local whisper.cpp server keeps speech fully offline, Groq's hosted
+Whisper is very fast:
+
+```json
+{
+  "sttEngine": "whisper",
+  "whisperBaseURL": "http://localhost:8080/v1",
+  "whisperModel": "whisper-1"
+}
+```
+
+```json
+{
+  "sttEngine": "whisper",
+  "whisperBaseURL": "https://api.groq.com/openai/v1",
+  "whisperModel": "whisper-large-v3"
+}
+```
+
+Hosted servers take their key from `WHISPER_API_KEY`
+(`wisp key set WHISPER_API_KEY`); local servers need none. If the base URL
+is missing, Wisp falls back to Apple STT.
